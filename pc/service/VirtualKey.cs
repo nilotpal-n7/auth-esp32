@@ -272,7 +272,7 @@ sealed class UsbIpConnection
                     _pendingIn.Clear();
                     foreach (var s in keep) _pendingIn.Enqueue(s);
                 }
-                CtapHid.Trace($"unlink seq {victim} ({(removed ? "pending IN dropped" : "already completed")})");
+                CtapHid.Verbose($"unlink seq {victim} ({(removed ? "pending IN dropped" : "already completed")})");
                 await WriteAsync(RetUnlink(seqnum, removed ? -104 /* -ECONNRESET */ : 0));
                 continue;
             }
@@ -332,7 +332,7 @@ sealed class UsbIpConnection
             else
             {
                 _outgoing.Enqueue(report);
-                if (report[4] != 0xBB) CtapHid.Trace($"no IN URB pending: report queued ({_outgoing.Count} waiting)");
+                if (report[4] != 0xBB) CtapHid.Verbose($"no IN URB pending: report queued ({_outgoing.Count} waiting)");
             }
         }
     }
@@ -489,8 +489,14 @@ sealed class CtapHid : IDisposable
 
     static readonly Stopwatch Clock = Stopwatch.StartNew();
 
-    /// <summary>HID-level trace (milliseconds since start) for troubleshooting.</summary>
+    /// <summary>HID problems (errors, stalls): always logged.</summary>
     public static void Trace(string msg) => Log.Write($"VK +{Clock.ElapsedMilliseconds}ms {msg}");
+
+    /// <summary>Per-packet trace, only while C:\ProgramData\AuthKey\vk-trace exists.</summary>
+    public static void Verbose(string msg)
+    {
+        if (File.Exists(Path.Combine(Config.Dir, "vk-trace"))) Trace(msg);
+    }
 
     public void Dispose() => _cancel?.Cancel();
 
@@ -501,7 +507,7 @@ sealed class CtapHid : IDisposable
         {
             byte cmd = p[4];
             int len = p[5] << 8 | p[6];
-            Trace($"<- cid {cid:X8} cmd {cmd:X2} len {len}");
+            Verbose($"<- cid {cid:X8} cmd {cmd:X2} len {len}");
             if (cmd == CmdCancel)
             {
                 lock (_lock) if (_busyCid == cid) _cancel?.Cancel();
@@ -639,7 +645,7 @@ sealed class CtapHid : IDisposable
 
     void SendLocked(uint cid, byte cmd, byte[] data)
     {
-        if (cmd != CmdKeepalive && cmd != CmdError) Trace($"-> cid {cid:X8} cmd {cmd:X2} len {data.Length}");
+        if (cmd != CmdKeepalive && cmd != CmdError) Verbose($"-> cid {cid:X8} cmd {cmd:X2} len {data.Length}");
         int off = 0;
         byte seq = 0;
         var p = new byte[64];

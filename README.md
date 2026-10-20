@@ -76,14 +76,24 @@ Add accounts over USB with the serial console, or with the helper script:
 (`otpauth://` URIs are the text inside a site's QR code. Most authenticator
 setup pages also show the secret as text.)
 
+Easier: with the QR helper running (below) and the device on USB, just open
+the site's "set up authenticator app" page. The helper spots the QR and adds
+the account to the device by itself (once per QR); then type the code shown
+on the OLED to finish the site's setup.
+
 ### Passkeys without a phone (hybrid, recommended on Windows 11)
 
 1. Keep the device on WiFi and the PC's Bluetooth on.
-2. Run the helper on the PC and leave it running:
+2. Run the helper on the PC. To start it hidden at every login (shows as
+   "AuthKey QR helper" in Task Manager, log in
+   `%LOCALAPPDATA%\AuthKey\qr_bridge.log`):
 
-   ```bash
-   .venv/Scripts/python tools/qr_bridge.py
+   ```powershell
+   pc\build.ps1                                                    # builds pc\bin\AuthKeyQR.exe
+   powershell -ExecutionPolicy Bypass -File tools\autostart.ps1    # -Remove to undo
    ```
+
+   Or run it in a terminal: `.venv/Scripts/python tools/qr_bridge.py`.
 
 3. On a website, choose to create or use a passkey, then
    **"Use a phone or tablet" / "iPhone, iPad or Android device"**.
@@ -143,6 +153,7 @@ answers a fresh random challenge (HMAC-SHA256 with a per-PC key).
   rejects the stored password (e.g. you changed it), automatic sign-in pauses;
   sign in normally and run `AuthKeyUnlock.exe pair` again.
 - Log: `C:\ProgramData\AuthKey\logs\service.log` (readable without admin).
+  For a per-packet USB key trace, create `C:\ProgramData\AuthKey\vk-trace`.
 - Emergency off-switch: create the file `C:\ProgramData\AuthKey\disabled`.
   Remove everything with `pc\uninstall.ps1 -Purge`.
 
