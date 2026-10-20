@@ -1,0 +1,12 @@
+# PC tools: python -m venv .venv && .venv/Scripts/pip install -r tools/requirements.txt
+pyserial        # USB serial console
+bleak           # Bluetooth (qr_bridge fallback, hybrid test)
+opencv-python-headless  # QR detection (qr_bridge)
+pillow          # screenshots (qr_bridge)
+numpy
+# Tests
+fido2
+cryptography
+websockets
+cbor2
+pyotp

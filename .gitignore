@@ -1,2 +1,7 @@
 .pio/
 .venv/
+__pycache__/
+*.pyc
+
+# Local secrets (WiFi passwords, OTA password). Copy src/secrets.example.h.
+src/secrets.h

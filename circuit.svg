@@ -1,0 +1,142 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="960" viewBox="0 0 1200 960" font-family="Segoe UI, Roboto, Arial, sans-serif">
+<rect width="1200" height="960" fill="#ffffff"/>
+<text x="600.0" y="50" font-size="30" text-anchor="middle" font-weight="bold" fill="#212121">AuthKey-ESP32 wiring</text>
+<text x="600.0" y="80" font-size="17" text-anchor="middle" font-weight="normal" fill="#555">ESP32 DevKit V1 (30-pin) · SSD1306 128×64 I²C OLED · 5 push buttons</text>
+<rect x="450" y="110" width="320" height="690" rx="14" fill="#263238"/>
+<rect x="550.0" y="124" width="120" height="26" rx="4" fill="#90a4ae"/>
+<rect x="538.0" y="156" width="144" height="190" rx="6" fill="#b0bec5"/>
+<text x="610.0" y="242" font-size="20" text-anchor="middle" font-weight="bold" fill="#263238">ESP32-</text>
+<text x="610.0" y="268" font-size="20" text-anchor="middle" font-weight="bold" fill="#263238">WROOM-32</text>
+<rect x="575.0" y="778" width="70" height="34" rx="5" fill="#9e9e9e"/>
+<text x="610.0" y="832" font-size="15" text-anchor="middle" font-weight="normal" fill="#555">USB</text>
+<circle cx="450" cy="170" r="7" fill="#fff" stroke="#cfd8dc" stroke-width="2"/>
+<text x="466" y="176" font-size="16" text-anchor="start" font-weight="normal" fill="#90a4ae">EN</text>
+<circle cx="450" cy="210" r="7" fill="#fff" stroke="#cfd8dc" stroke-width="2"/>
+<text x="466" y="216" font-size="16" text-anchor="start" font-weight="normal" fill="#90a4ae">VP 36</text>
+<circle cx="450" cy="250" r="7" fill="#fff" stroke="#cfd8dc" stroke-width="2"/>
+<text x="466" y="256" font-size="16" text-anchor="start" font-weight="normal" fill="#90a4ae">VN 39</text>
+<circle cx="450" cy="290" r="7" fill="#fff" stroke="#cfd8dc" stroke-width="2"/>
+<text x="466" y="296" font-size="16" text-anchor="start" font-weight="normal" fill="#90a4ae">D34</text>
+<circle cx="450" cy="330" r="7" fill="#fff" stroke="#cfd8dc" stroke-width="2"/>
+<text x="466" y="336" font-size="16" text-anchor="start" font-weight="normal" fill="#90a4ae">D35</text>
+<circle cx="450" cy="370" r="7" fill="#6a1b9a" stroke="#cfd8dc" stroke-width="2"/>
+<text x="466" y="376" font-size="16" text-anchor="start" font-weight="bold" fill="#fff">D32</text>
+<circle cx="450" cy="410" r="7" fill="#ad1457" stroke="#cfd8dc" stroke-width="2"/>
+<text x="466" y="416" font-size="16" text-anchor="start" font-weight="bold" fill="#fff">D33</text>
+<circle cx="450" cy="450" r="7" fill="#2e7d32" stroke="#cfd8dc" stroke-width="2"/>
+<text x="466" y="456" font-size="16" text-anchor="start" font-weight="bold" fill="#fff">D25</text>
+<circle cx="450" cy="490" r="7" fill="#ef6c00" stroke="#cfd8dc" stroke-width="2"/>
+<text x="466" y="496" font-size="16" text-anchor="start" font-weight="bold" fill="#fff">D26</text>
+<circle cx="450" cy="530" r="7" fill="#00838f" stroke="#cfd8dc" stroke-width="2"/>
+<text x="466" y="536" font-size="16" text-anchor="start" font-weight="bold" fill="#fff">D27</text>
+<circle cx="450" cy="570" r="7" fill="#fff" stroke="#cfd8dc" stroke-width="2"/>
+<text x="466" y="576" font-size="16" text-anchor="start" font-weight="normal" fill="#90a4ae">D14</text>
+<circle cx="450" cy="610" r="7" fill="#fff" stroke="#cfd8dc" stroke-width="2"/>
+<text x="466" y="616" font-size="16" text-anchor="start" font-weight="normal" fill="#90a4ae">D12</text>
+<circle cx="450" cy="650" r="7" fill="#fff" stroke="#cfd8dc" stroke-width="2"/>
+<text x="466" y="656" font-size="16" text-anchor="start" font-weight="normal" fill="#90a4ae">D13</text>
+<circle cx="450" cy="690" r="7" fill="#212121" stroke="#cfd8dc" stroke-width="2"/>
+<text x="466" y="696" font-size="16" text-anchor="start" font-weight="bold" fill="#fff">GND</text>
+<circle cx="450" cy="730" r="7" fill="#fff" stroke="#cfd8dc" stroke-width="2"/>
+<text x="466" y="736" font-size="16" text-anchor="start" font-weight="normal" fill="#90a4ae">VIN</text>
+<circle cx="770" cy="170" r="7" fill="#fff" stroke="#cfd8dc" stroke-width="2"/>
+<text x="754" y="176" font-size="16" text-anchor="end" font-weight="normal" fill="#90a4ae">D23</text>
+<circle cx="770" cy="210" r="7" fill="#f9a825" stroke="#cfd8dc" stroke-width="2"/>
+<text x="754" y="216" font-size="16" text-anchor="end" font-weight="bold" fill="#fff">D22</text>
+<circle cx="770" cy="250" r="7" fill="#fff" stroke="#cfd8dc" stroke-width="2"/>
+<text x="754" y="256" font-size="16" text-anchor="end" font-weight="normal" fill="#90a4ae">TX0</text>
+<circle cx="770" cy="290" r="7" fill="#fff" stroke="#cfd8dc" stroke-width="2"/>
+<text x="754" y="296" font-size="16" text-anchor="end" font-weight="normal" fill="#90a4ae">RX0</text>
+<circle cx="770" cy="330" r="7" fill="#1565c0" stroke="#cfd8dc" stroke-width="2"/>
+<text x="754" y="336" font-size="16" text-anchor="end" font-weight="bold" fill="#fff">D21</text>
+<circle cx="770" cy="370" r="7" fill="#fff" stroke="#cfd8dc" stroke-width="2"/>
+<text x="754" y="376" font-size="16" text-anchor="end" font-weight="normal" fill="#90a4ae">D19</text>
+<circle cx="770" cy="410" r="7" fill="#fff" stroke="#cfd8dc" stroke-width="2"/>
+<text x="754" y="416" font-size="16" text-anchor="end" font-weight="normal" fill="#90a4ae">D18</text>
+<circle cx="770" cy="450" r="7" fill="#fff" stroke="#cfd8dc" stroke-width="2"/>
+<text x="754" y="456" font-size="16" text-anchor="end" font-weight="normal" fill="#90a4ae">D5</text>
+<circle cx="770" cy="490" r="7" fill="#fff" stroke="#cfd8dc" stroke-width="2"/>
+<text x="754" y="496" font-size="16" text-anchor="end" font-weight="normal" fill="#90a4ae">TX2</text>
+<circle cx="770" cy="530" r="7" fill="#fff" stroke="#cfd8dc" stroke-width="2"/>
+<text x="754" y="536" font-size="16" text-anchor="end" font-weight="normal" fill="#90a4ae">RX2</text>
+<circle cx="770" cy="570" r="7" fill="#fff" stroke="#cfd8dc" stroke-width="2"/>
+<text x="754" y="576" font-size="16" text-anchor="end" font-weight="normal" fill="#90a4ae">D4</text>
+<circle cx="770" cy="610" r="7" fill="#fff" stroke="#cfd8dc" stroke-width="2"/>
+<text x="754" y="616" font-size="16" text-anchor="end" font-weight="normal" fill="#90a4ae">D2</text>
+<circle cx="770" cy="650" r="7" fill="#fff" stroke="#cfd8dc" stroke-width="2"/>
+<text x="754" y="656" font-size="16" text-anchor="end" font-weight="normal" fill="#90a4ae">D15</text>
+<circle cx="770" cy="690" r="7" fill="#212121" stroke="#cfd8dc" stroke-width="2"/>
+<text x="754" y="696" font-size="16" text-anchor="end" font-weight="bold" fill="#fff">GND</text>
+<circle cx="770" cy="730" r="7" fill="#d32f2f" stroke="#cfd8dc" stroke-width="2"/>
+<text x="754" y="736" font-size="16" text-anchor="end" font-weight="bold" fill="#fff">3V3</text>
+<polyline points="450,370 420,370 420,250 235,250" fill="none" stroke="#6a1b9a" stroke-width="4" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="70" y1="250" x2="135" y2="250" stroke="#212121" stroke-width="4"/>
+<circle cx="135" cy="250" r="5" fill="#212121"/>
+<circle cx="235" cy="250" r="5" fill="#212121"/>
+<line x1="140" y1="232" x2="230" y2="232" stroke="#212121" stroke-width="4"/>
+<line x1="185" y1="232" x2="185" y2="216" stroke="#212121" stroke-width="4"/>
+<line x1="170" y1="216" x2="200" y2="216" stroke="#212121" stroke-width="4"/>
+<text x="185" y="278" font-size="16" text-anchor="middle" font-weight="bold" fill="#6a1b9a">LEFT · GPIO 32</text>
+<text x="185" y="297" font-size="14" text-anchor="middle" font-weight="normal" fill="#777">optional</text>
+<polyline points="450,410 395,410 395,340 235,340" fill="none" stroke="#ad1457" stroke-width="4" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="70" y1="340" x2="135" y2="340" stroke="#212121" stroke-width="4"/>
+<circle cx="135" cy="340" r="5" fill="#212121"/>
+<circle cx="235" cy="340" r="5" fill="#212121"/>
+<line x1="140" y1="322" x2="230" y2="322" stroke="#212121" stroke-width="4"/>
+<line x1="185" y1="322" x2="185" y2="306" stroke="#212121" stroke-width="4"/>
+<line x1="170" y1="306" x2="200" y2="306" stroke="#212121" stroke-width="4"/>
+<text x="185" y="368" font-size="16" text-anchor="middle" font-weight="bold" fill="#ad1457">RIGHT · GPIO 33</text>
+<text x="185" y="387" font-size="14" text-anchor="middle" font-weight="normal" fill="#777">optional</text>
+<polyline points="450,450 370,450 370,430 235,430" fill="none" stroke="#2e7d32" stroke-width="4" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="70" y1="430" x2="135" y2="430" stroke="#212121" stroke-width="4"/>
+<circle cx="135" cy="430" r="5" fill="#212121"/>
+<circle cx="235" cy="430" r="5" fill="#212121"/>
+<line x1="140" y1="412" x2="230" y2="412" stroke="#212121" stroke-width="4"/>
+<line x1="185" y1="412" x2="185" y2="396" stroke="#212121" stroke-width="4"/>
+<line x1="170" y1="396" x2="200" y2="396" stroke="#212121" stroke-width="4"/>
+<text x="185" y="458" font-size="16" text-anchor="middle" font-weight="bold" fill="#2e7d32">UP · GPIO 25</text>
+<polyline points="450,490 395,490 395,520 235,520" fill="none" stroke="#ef6c00" stroke-width="4" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="70" y1="520" x2="135" y2="520" stroke="#212121" stroke-width="4"/>
+<circle cx="135" cy="520" r="5" fill="#212121"/>
+<circle cx="235" cy="520" r="5" fill="#212121"/>
+<line x1="140" y1="502" x2="230" y2="502" stroke="#212121" stroke-width="4"/>
+<line x1="185" y1="502" x2="185" y2="486" stroke="#212121" stroke-width="4"/>
+<line x1="170" y1="486" x2="200" y2="486" stroke="#212121" stroke-width="4"/>
+<text x="185" y="548" font-size="16" text-anchor="middle" font-weight="bold" fill="#ef6c00">DOWN · GPIO 26</text>
+<polyline points="450,530 420,530 420,610 235,610" fill="none" stroke="#00838f" stroke-width="4" stroke-linejoin="round" stroke-linecap="round"/>
+<line x1="70" y1="610" x2="135" y2="610" stroke="#212121" stroke-width="4"/>
+<circle cx="135" cy="610" r="5" fill="#212121"/>
+<circle cx="235" cy="610" r="5" fill="#212121"/>
+<line x1="140" y1="592" x2="230" y2="592" stroke="#212121" stroke-width="4"/>
+<line x1="185" y1="592" x2="185" y2="576" stroke="#212121" stroke-width="4"/>
+<line x1="170" y1="576" x2="200" y2="576" stroke="#212121" stroke-width="4"/>
+<text x="185" y="638" font-size="16" text-anchor="middle" font-weight="bold" fill="#00838f">OK · GPIO 27</text>
+<text x="185" y="657" font-size="14" text-anchor="middle" font-weight="normal" fill="#777">approve</text>
+<polyline points="70,250 70,690 450,690" fill="none" stroke="#212121" stroke-width="4" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="70" cy="250" r="6" fill="#212121"/>
+<circle cx="70" cy="340" r="6" fill="#212121"/>
+<circle cx="70" cy="430" r="6" fill="#212121"/>
+<circle cx="70" cy="520" r="6" fill="#212121"/>
+<circle cx="70" cy="610" r="6" fill="#212121"/>
+<text x="80" y="714" font-size="15" text-anchor="start" font-weight="normal" fill="#555">GND (shared by all buttons)</text>
+<rect x="905" y="400" width="245" height="200" rx="10" fill="#0d47a1"/>
+<rect x="980" y="430" width="155" height="140" rx="4" fill="#000"/>
+<text x="1057.5" y="495" font-size="20" text-anchor="middle" font-weight="bold" fill="#4fc3f7">0.96" OLED</text>
+<text x="1057.5" y="522" font-size="15" text-anchor="middle" font-weight="normal" fill="#4fc3f7">SSD1306 · I²C 0x3C</text>
+<polyline points="770,210 880,210 880,440 905,440" fill="none" stroke="#f9a825" stroke-width="4" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="905" cy="440" r="7" fill="#f9a825" stroke="#bbdefb" stroke-width="2"/>
+<text x="919" y="446" font-size="15" text-anchor="start" font-weight="bold" fill="#fff">SCL</text>
+<polyline points="770,330 860,330 860,480 905,480" fill="none" stroke="#1565c0" stroke-width="4" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="905" cy="480" r="7" fill="#1565c0" stroke="#bbdefb" stroke-width="2"/>
+<text x="919" y="486" font-size="15" text-anchor="start" font-weight="bold" fill="#fff">SDA</text>
+<polyline points="770,690 840,690 840,520 905,520" fill="none" stroke="#212121" stroke-width="4" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="905" cy="520" r="7" fill="#212121" stroke="#bbdefb" stroke-width="2"/>
+<text x="919" y="526" font-size="15" text-anchor="start" font-weight="bold" fill="#fff">GND</text>
+<polyline points="770,730 880,730 880,560 905,560" fill="none" stroke="#d32f2f" stroke-width="4" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="905" cy="560" r="7" fill="#d32f2f" stroke="#bbdefb" stroke-width="2"/>
+<text x="919" y="566" font-size="15" text-anchor="start" font-weight="bold" fill="#fff">VCC</text>
+<text x="905" y="630" font-size="14" text-anchor="start" font-weight="normal" fill="#777">Pin order differs between modules —</text>
+<text x="905" y="648" font-size="14" text-anchor="start" font-weight="normal" fill="#777">match the labels printed on yours.</text>
+<text x="600.0" y="905" font-size="17" text-anchor="middle" font-weight="normal" fill="#212121">Every button: one leg to its GPIO, the other to GND. No resistors needed (internal pull-ups).</text>
+<text x="600.0" y="932" font-size="15" text-anchor="middle" font-weight="normal" fill="#555">LEFT / RIGHT are optional shortcuts; UP, DOWN and OK are enough to use every feature.</text>
+</svg>
