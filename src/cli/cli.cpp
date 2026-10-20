@@ -55,7 +55,7 @@ static void help() {
         "  approve | deny | uvpin <pin> | setpin <pin> | clearpin   (test build only)\n"
 #endif
         "  wifi list | wifi add <ssid> <password> | wifi del <n>\n"
-        "  wifi connect | wifi reset   reconnect | restore secrets.h list\n"
+        "  wifi connect | wifi reset   reconnect | restore the .env list\n"
         "  time | time set <unix>      show / set UTC clock\n"
         "  tz <POSIX TZ>               clock timezone, e.g. IST-5:30, CET-1CEST,M3.5.0,M10.5.0/3\n"
         "  passkeys | passkey del <n>  list / delete discoverable credentials\n"

@@ -15,7 +15,7 @@ struct SavedNetwork {
     char pass[65];
 };
 
-// Trailing empty entry keeps the array valid when secrets.h lists none.
+// Trailing empty entry keeps the array valid when .env lists none.
 static const SavedNetwork DEFAULT_NETWORKS[] = { SECRET_WIFI_NETWORKS {"", ""} };
 static const int DEFAULT_COUNT = sizeof(DEFAULT_NETWORKS) / sizeof(DEFAULT_NETWORKS[0]) - 1;
 
@@ -72,7 +72,7 @@ void savedResetToDefaults() {
         s_savedCount++;
     }
     persist();
-    logf("NET", "Imported %d network(s) from secrets.h", s_savedCount);
+    logf("NET", "Imported %d network(s) from .env", s_savedCount);
 }
 
 int savedCount() { return s_savedCount; }

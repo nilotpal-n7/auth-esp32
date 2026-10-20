@@ -3,7 +3,8 @@
 __pycache__/
 *.pyc
 
-# Local secrets (WiFi passwords, OTA password). Copy src/secrets.example.h.
+# Local secrets (WiFi passwords, OTA password). Copy .env.example to .env.
+.env
 src/secrets.h
 
 # Windows sign-in build output

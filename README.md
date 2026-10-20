@@ -38,7 +38,7 @@ a few buttons:
 ## Build & flash
 
 ```bash
-cp src/secrets.example.h src/secrets.h     # add your WiFi networks
+cp .env.example .env                       # add your WiFi networks (and OTA password)
 pio run -t upload                          # build + flash over USB
 pio device monitor                         # serial console (type: help)
 ```
@@ -48,6 +48,14 @@ flash once with `pio run -t erase` before uploading.
 
 WiFi is used for the clock (NTP), for hybrid sign-ins, and for optional OTA
 updates. Without WiFi, TOTP still works once the clock is set (`time set <unix>`).
+
+All secrets live in `.env` (git-ignored): `WIFI_<n>_SSID` / `WIFI_<n>_PASSWORD`,
+`OTA_PASSWORD` and `OTA_HOST`. `scripts/env_secrets.py` reads it at build
+time, so nothing secret is kept in `src/`.
+
+**Updates over WiFi (OTA):** set `OTA_PASSWORD` in `.env`, flash once over
+USB, then update wirelessly with `pio run -e ota -t upload` (password and
+host come from `.env`). Leave `OTA_PASSWORD` empty to keep OTA off.
 
 ## Using it
 
@@ -180,8 +188,8 @@ answers a fresh random challenge (HMAC-SHA256 with a per-PC key).
   only *prefer* verification, but Google then treats the key as a
   2-Step-Verification-only key. With the QR helper running, any site asking
   for this passkey on your PC gets signed in while the device is unlocked.
-- OTA is **off** unless `SECRET_OTA_PASSWORD` is set. Anyone who can flash
-  firmware can read your keys.
+- OTA is **off** unless `OTA_PASSWORD` is set in `.env`. Anyone who can flash
+  firmware can read your keys, so use a long random password and trusted WiFi.
 - The `test` build (`pio run -e test`) adds console commands that let software
   on the PC approve requests. Use it only for running the tests.
 
@@ -203,7 +211,7 @@ Flash the normal build afterwards: `pio run -t upload`.
 ```text
 src/
   main.cpp               setup + cooperative main loop
-  config.h               pins and constants (secrets.h: WiFi / OTA password)
+  config.h               pins and constants (secrets: .env via scripts/env_secrets.py)
   core/                  logging, persistent settings, PIN
   crypto/                mbedTLS wrappers (P-256, AES-GCM, HKDF, ...)
   util/                  CBOR reader/writer, hex/base32, FIDO QR digits

@@ -5,13 +5,9 @@
 
 #include <Arduino.h>
 
-#if __has_include("secrets.h")
-#include "secrets.h"
-#else
-#warning "src/secrets.h not found - copy src/secrets.example.h to src/secrets.h"
-#define SECRET_WIFI_NETWORKS
-#define SECRET_OTA_PASSWORD ""
-#endif
+// WiFi networks and the OTA password come from .env (see .env.example);
+// scripts/env_secrets.py generates this header in the build directory.
+#include "authkey_secrets.h"
 
 #define FW_NAME     "AuthKey-ESP32"
 #define FW_VERSION  "2.0.0"

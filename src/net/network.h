@@ -32,7 +32,7 @@ int  savedCount();
 bool savedSsid(int index, char* out, size_t cap);
 bool savedAdd(const char* ssid, const char* password);
 bool savedRemove(int index);
-void savedResetToDefaults();        // re-import from secrets.h
+void savedResetToDefaults();        // re-import the .env list
 
 // --- OTA ---
 bool otaEnabled();
