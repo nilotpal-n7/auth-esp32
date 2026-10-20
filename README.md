@@ -11,6 +11,7 @@ a few buttons:
   - **Bluetooth security key** (CTAP over BLE): pair once, then pick
     "Security key". Works on Android, ChromeOS, Linux/macOS Chrome, and
     Windows 10 (Windows 11 support for BLE keys is inconsistent).
+  - **USB security key** on Windows, through the PC service and usbip-win2.
 - Every registration and sign-in is approved **on the device** with the OK
   button. An optional on-device PIN adds user verification.
 
@@ -97,6 +98,17 @@ Pair "AuthKey-ESP32" in your OS Bluetooth settings. The OLED shows a 6-digit
 code; press OK if it matches the PC. Then choose "Security key" when a site
 asks for a passkey.
 
+### Passkeys over USB ("Security key" on Windows)
+
+With the Windows service installed (see *Windows sign-in* below) and
+[usbip-win2](https://github.com/vadimgrn/usbip-win2/releases) installed, the
+plugged-in AuthKey also shows up as a normal USB FIDO security key. When a site
+asks for a passkey, pick **Security key**. The service presents a virtual
+USB HID key over USB/IP on 127.0.0.1 and forwards each CTAP request to the
+device over its serial port. The key attaches when the board is plugged in
+and detaches when it's unplugged. To turn it off, create
+`C:\ProgramData\AuthKey\no-virtual-key` and restart the service.
+
 ### Device PIN (user verification)
 
 Set a 4–8 digit PIN in **Menu → Device PIN**. Sites that ask for user
@@ -130,6 +142,7 @@ answers a fresh random challenge (HMAC-SHA256 with a per-PC key).
 - Your normal PIN, face and password sign-in stay available. If Windows ever
   rejects the stored password (e.g. you changed it), automatic sign-in pauses;
   sign in normally and run `AuthKeyUnlock.exe pair` again.
+- Log: `C:\ProgramData\AuthKey\logs\service.log` (readable without admin).
 - Emergency off-switch: create the file `C:\ProgramData\AuthKey\disabled`.
   Remove everything with `pc\uninstall.ps1 -Purge`.
 
@@ -148,11 +161,14 @@ answers a fresh random challenge (HMAC-SHA256 with a per-PC key).
   secure boot would fix this, but they burn eFuses irreversibly, so they're
   left to you.
 - **Auto-approve** (off by default) makes sign-ins and passkey registrations
-  hands-free: no button press and no PIN (your saved PIN is kept for when you
-  turn it off). The site is told the user was *not* verified, so sites that
-  strictly require verification refuse it. With the QR helper
-  running, any site asking for this passkey on your PC gets signed in, so the
-  device no longer protects you against someone using your unlocked PC.
+  hands-free: no button press. If a device PIN is set, sites that require
+  user verification (Google, Microsoft, ...) ask for the PIN **once**; the
+  device then stays *unlocked* for 12 hours (`uvhours <n>`, 0 = until reboot)
+  and verifies hands-free, like an unlocked phone. `lock` ends the session.
+  Without a PIN the device reports "not verified", which works for sites that
+  only *prefer* verification, but Google then treats the key as a
+  2-Step-Verification-only key. With the QR helper running, any site asking
+  for this passkey on your PC gets signed in while the device is unlocked.
 - OTA is **off** unless `SECRET_OTA_PASSWORD` is set. Anyone who can flash
   firmware can read your keys.
 - The `test` build (`pio run -e test`) adds console commands that let software

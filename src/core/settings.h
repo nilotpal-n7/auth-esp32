@@ -32,6 +32,16 @@ bool pinSet(const char* pin);      // Validates length / digits; resets retries
 bool pinVerify(const char* pin);   // Decrements retries on failure
 void pinClear();
 
+// Unlocked session: after the PIN is entered on the device it counts as
+// user-verified (like an unlocked phone) until the session expires, the
+// device reboots, or `lock` is used. 0 hours = until reboot.
+void uvSessionStart();
+void uvSessionEnd();
+bool uvSessionActive();
+uint32_t uvSessionMinutesLeft();   // 0 when locked; UINT32_MAX when "until reboot"
+int  uvSessionHours();
+void setUvSessionHours(int hours);
+
 // Erase FIDO secrets, PIN and counter (CTAP reset). Keeps WiFi/TOTP/prefs.
 void resetFido();
 

@@ -17,6 +17,10 @@ static uint8_t  s_pinRecord[48];
 static bool     s_pinSet = false;
 static uint8_t  s_pinRetries = FIDO_PIN_MAX_RETRIES;
 
+static bool     s_uvActive = false;
+static uint32_t s_uvStartMs = 0;
+static int      s_uvHours = 12;
+
 bool init() {
     if (!s_prefs.begin("sys", false)) {
         logf("SET", "NVS open failed");
@@ -33,6 +37,7 @@ bool init() {
     s_pinSet      = s_prefs.isKey("pin") &&
                     s_prefs.getBytes("pin", s_pinRecord, sizeof(s_pinRecord)) == sizeof(s_pinRecord);
     s_pinRetries  = s_prefs.getUChar("pinTry", FIDO_PIN_MAX_RETRIES);
+    s_uvHours     = s_prefs.getInt("uvh", 12);
     return true;
 }
 
@@ -107,7 +112,34 @@ bool pinVerify(const char* pin) {
     return ok;
 }
 
+void uvSessionStart() {
+    s_uvActive = true;
+    s_uvStartMs = millis();
+}
+
+void uvSessionEnd() { s_uvActive = false; }
+
+bool uvSessionActive() {
+    if (!s_uvActive || !s_pinSet) return false;
+    if (s_uvHours > 0 && millis() - s_uvStartMs >= (uint32_t)s_uvHours * 3600000UL) s_uvActive = false;
+    return s_uvActive;
+}
+
+uint32_t uvSessionMinutesLeft() {
+    if (!uvSessionActive()) return 0;
+    if (s_uvHours == 0) return UINT32_MAX;
+    return ((uint32_t)s_uvHours * 3600000UL - (millis() - s_uvStartMs)) / 60000UL;
+}
+
+int uvSessionHours() { return s_uvHours; }
+
+void setUvSessionHours(int hours) {
+    s_uvHours = hours < 0 ? 0 : hours > 168 ? 168 : hours;
+    s_prefs.putInt("uvh", s_uvHours);
+}
+
 void pinClear() {
+    s_uvActive = false;
     if (s_prefs.isKey("pin")) s_prefs.remove("pin");
     if (s_prefs.isKey("pinTry")) s_prefs.remove("pinTry");
     s_pinSet = false;
@@ -116,6 +148,7 @@ void pinClear() {
 }
 
 void resetFido() {
+    s_uvActive = false;
     regenerateMasterKey();
     s_counter = 0;
     s_prefs.putUInt("ctr", 0);

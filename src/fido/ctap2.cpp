@@ -623,6 +623,7 @@ void userDeny() {
 bool userSubmitPin(const char* pin) {
     if (!s_pending || !s_prompt.needPin) return false;
     if (settings::pinVerify(pin)) {
+        settings::uvSessionStart();     // stay unlocked for the session window
         s_uvDone = true;
         s_prompt.needPin = false;
         complete();                     // PIN entry is also proof of presence
@@ -709,12 +710,11 @@ bool submit(CtapTransport t, const uint8_t* msg, size_t len, CtapReplyFn reply) 
 
     uint8_t st = cmd == CMD_MAKE_CREDENTIAL ? parseMakeCredential(params, plen, s_req)
                                             : parseGetAssertion(params, plen, s_req);
-    if (st == CTAP2_OK && s_req.uv && settings::autoApprove()) {
-        // Auto-approve means hands-free sign-in and registration: skip the
-        // PIN (the saved PIN is kept for when auto-approve is turned off)
-        // and report UV=0 truthfully; sites that strictly require UV refuse it.
-        logf("CTAP", "auto-approve: continuing without PIN (UV not performed)");
-        s_req.uv = false;
+    if (st == CTAP2_OK && s_req.uv && settings::pinIsSet() && settings::uvSessionActive()) {
+        // The PIN was entered on the device earlier in this unlocked session
+        // (like an unlocked phone), so this request is user-verified.
+        logf("CTAP", "device unlocked: user verification satisfied by the PIN session");
+        s_uvDone = true;
     }
     if (st == CTAP2_OK && s_req.uv && !s_req.selectOnly) {
         st = checkUvAvailable();
@@ -754,7 +754,7 @@ bool submit(CtapTransport t, const uint8_t* msg, size_t len, CtapReplyFn reply) 
             return true;
         }
         startPrompt(PromptKind::Login);
-        if (!s_req.uv && settings::autoApprove()) {
+        if ((!s_req.uv || s_uvDone) && settings::autoApprove()) {
             logf("CTAP", "auto-approved sign-in to %s", s_req.rpId);
             complete();
         }
@@ -762,7 +762,7 @@ bool submit(CtapTransport t, const uint8_t* msg, size_t len, CtapReplyFn reply) 
     }
 
     startPrompt(PromptKind::Register);
-    if (!s_req.uv && settings::autoApprove()) {
+    if ((!s_req.uv || s_uvDone) && settings::autoApprove()) {
         logf("CTAP", "auto-approved registration for %s", s_req.rpId);
         complete();
     }

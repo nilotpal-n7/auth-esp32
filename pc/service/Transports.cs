@@ -68,6 +68,20 @@ public sealed class UsbTransport : ITransport
         return result;
     }
 
+    /// <summary>Serialises access to the COM port (unlock checks and security-key requests).</summary>
+    public static readonly SemaphoreSlim SerialGate = new(1, 1);
+
+    /// <summary>Open, retrying briefly while another program (e.g. qr_bridge) holds the port.</summary>
+    public static SerialPort OpenWithRetry(string port, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (true)
+        {
+            try { return Open(port); }
+            catch (UnauthorizedAccessException) when (DateTime.UtcNow < deadline) { Thread.Sleep(150); }
+        }
+    }
+
     public static SerialPort Open(string port)
     {
         // DTR/RTS stay low so opening the port does not reset the ESP32.
@@ -84,9 +98,23 @@ public sealed class UsbTransport : ITransport
     public static async Task<string?> CommandAsync(string port, string line, Func<string, bool> isFinal,
                                                    TimeSpan timeout, CancellationToken ct)
     {
+        await SerialGate.WaitAsync(ct);
+        try
+        {
+            return await CommandLockedAsync(port, line, isFinal, timeout, ct);
+        }
+        finally
+        {
+            SerialGate.Release();
+        }
+    }
+
+    static async Task<string?> CommandLockedAsync(string port, string line, Func<string, bool> isFinal,
+                                                  TimeSpan timeout, CancellationToken ct)
+    {
         return await Task.Run(() =>
         {
-            using var sp = Open(port);
+            using var sp = OpenWithRetry(port, TimeSpan.FromSeconds(2));
             sp.DiscardInBuffer();
             sp.Write(line);
             var deadline = DateTime.UtcNow + timeout;

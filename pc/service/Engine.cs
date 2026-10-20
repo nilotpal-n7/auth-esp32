@@ -1,12 +1,42 @@
+using System.Security.AccessControl;
 using System.Security.Cryptography;
+using System.Security.Principal;
 using System.Text;
 
 namespace AuthKey;
 
+/// <summary>
+/// Event log in C:\ProgramData\AuthKey\logs\service.log. It holds no secrets,
+/// so local users may read it (no admin needed to troubleshoot); only SYSTEM
+/// and Administrators can write, so it can't be redirected or tampered with.
+/// </summary>
 static class Log
 {
     static readonly object Gate = new();
+    static bool _dirReady;
     public static bool ToConsole;
+    public static string Dir => Path.Combine(Config.Dir, "logs");
+
+    static void EnsureDir()
+    {
+        if (_dirReady) return;
+        var di = Directory.CreateDirectory(Dir);
+        try
+        {
+            var sec = new DirectorySecurity();
+            sec.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+            var inherit = InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit;
+            void Allow(WellKnownSidType sid, FileSystemRights rights) =>
+                sec.AddAccessRule(new FileSystemAccessRule(new SecurityIdentifier(sid, null), rights, inherit,
+                                                           PropagationFlags.None, AccessControlType.Allow));
+            Allow(WellKnownSidType.LocalSystemSid, FileSystemRights.FullControl);
+            Allow(WellKnownSidType.BuiltinAdministratorsSid, FileSystemRights.FullControl);
+            Allow(WellKnownSidType.BuiltinUsersSid, FileSystemRights.ReadAndExecute);
+            di.SetAccessControl(sec);
+        }
+        catch { }   // not elevated (console mode): keep the default ACL
+        _dirReady = true;
+    }
 
     public static void Write(string msg)
     {
@@ -16,8 +46,8 @@ static class Log
         {
             lock (Gate)
             {
-                Directory.CreateDirectory(Config.Dir);
-                var path = Path.Combine(Config.Dir, "service.log");
+                EnsureDir();
+                var path = Path.Combine(Dir, "service.log");
                 if (File.Exists(path) && new FileInfo(path).Length > 512 * 1024)
                     File.Move(path, path + ".old", overwrite: true);
                 File.AppendAllText(path, line + Environment.NewLine);

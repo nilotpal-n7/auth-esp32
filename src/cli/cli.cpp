@@ -61,7 +61,8 @@ static void help() {
         "  passkeys | passkey del <n>  list / delete discoverable credentials\n"
         "  unlock list | unlock remove <n>   PCs paired for Windows sign-in\n"
         "  pin                         device PIN status (set it on the device)\n"
-        "  auto on|off                 hands-free sign-in + registration (no OK/PIN)\n"
+        "  lock | uvhours <n>          end the unlocked-PIN session | its length (0 = until reboot)\n"
+        "  auto on|off                 hands-free sign-in + registration (PIN once per unlocked session)\n"
         "  hybrid <FIDO:/...> | hybrid stop   phone-style login from a QR string\n"
         "  bt forget                   remove all Bluetooth bonds\n"
         "  log                         recent events\n"
@@ -85,6 +86,10 @@ static void status() {
              creds::residentCapacity(), (unsigned long)settings::signCount());
     consolef("  PIN:       %s, auto-approve %s\n",
              settings::pinIsSet() ? "set" : "not set", settings::autoApprove() ? "ON" : "off");
+    uint32_t left = settings::uvSessionMinutesLeft();
+    if (left == UINT32_MAX) consoleWrite("  Session:   unlocked until reboot\n");
+    else if (left) consolef("  Session:   unlocked, %lu min left\n", (unsigned long)left);
+    else consoleWrite("  Session:   locked (next verified request asks for the PIN)\n");
     consolef("  Hybrid:    %s\n", hybrid::stateText());
     consolef("  OTA:       %s\n", network::otaEnabled() ? "enabled" : "disabled (no password)");
     consolef("  Heap:      %u free\n", (unsigned)ESP.getFreeHeap());
@@ -228,7 +233,12 @@ static void serialCtapReply(const uint8_t* data, size_t len) {
 
 static void cmdCtap(int argc, char** argv) {
     static uint8_t msg[FIDO_MAX_MSG];
-    if (argc < 2) { consoleWrite("ERR usage: ctap <hex>\n"); return; }
+    if (argc < 2) { consoleWrite("ERR usage: ctap <hex> | ctap cancel\n"); return; }
+    if (!strcmp(argv[1], "cancel")) {
+        // The pending request (if any) is answered with KEEPALIVE_CANCEL.
+        ctap::cancel(CtapTransport::Serial);
+        return;
+    }
     int n = hexDecode(argv[1], strlen(argv[1]), msg, sizeof(msg));
     if (n <= 0) { consoleWrite("ERR bad hex\n"); return; }
     if (!ctap::submit(CtapTransport::Serial, msg, n, serialCtapReply)) {
@@ -273,6 +283,12 @@ static void execute(char* line) {
     } else if (!strcmp(cmd, "auto") && argc >= 2) {
         settings::setAutoApprove(!strcmp(argv[1], "on"));
         consolef("OK auto-approve %s\n", settings::autoApprove() ? "ON" : "off");
+    } else if (!strcmp(cmd, "lock")) {
+        settings::uvSessionEnd();
+        consoleWrite("OK locked: the next verified request asks for the PIN\n");
+    } else if (!strcmp(cmd, "uvhours") && argc >= 2) {
+        settings::setUvSessionHours(atoi(argv[1]));
+        consolef("OK unlocked session lasts %d hour(s) (0 = until reboot)\n", settings::uvSessionHours());
     } else if (!strcmp(cmd, "pin")) {
         consolef("PIN %s, %d tries left. Set or change it on the device (menu > Device PIN).\n",
                  settings::pinIsSet() ? "set" : "not set", settings::pinRetries());

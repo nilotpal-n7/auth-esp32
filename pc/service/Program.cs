@@ -36,8 +36,11 @@ public static class Program
                     Log.ToConsole = true;
                     var server = new PipeServer();
                     server.Start();
-                    Console.WriteLine("Pipe server running. Press Enter to stop.");
+                    var key = new VirtualKey();
+                    key.Start();
+                    Console.WriteLine("Pipe server + virtual USB key running. Press Enter to stop.");
                     Console.ReadLine();
+                    key.Stop();
                     server.Stop();
                     return 0;
                 case "pair": RequireAdmin(); return await PairAsync();
@@ -222,7 +225,18 @@ public static class Program
 public sealed class UnlockService : ServiceBase
 {
     readonly PipeServer _server = new();
+    readonly VirtualKey _key = new();
     public UnlockService() => ServiceName = "AuthKeyUnlock";
-    protected override void OnStart(string[] args) => _server.Start();
-    protected override void OnStop() => _server.Stop();
+
+    protected override void OnStart(string[] args)
+    {
+        _server.Start();
+        _key.Start();
+    }
+
+    protected override void OnStop()
+    {
+        _key.Stop();
+        _server.Stop();
+    }
 }
