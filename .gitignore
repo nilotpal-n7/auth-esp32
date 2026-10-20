@@ -5,3 +5,8 @@ __pycache__/
 
 # Local secrets (WiFi passwords, OTA password). Copy src/secrets.example.h.
 src/secrets.h
+
+# Windows sign-in build output
+pc/bin/
+pc/service/bin/
+pc/service/obj/

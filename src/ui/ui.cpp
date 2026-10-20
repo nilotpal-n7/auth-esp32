@@ -9,6 +9,7 @@
 #include "totp/totp.h"
 #include "transport/ble.h"
 #include "transport/hybrid.h"
+#include "unlock/unlock.h"
 
 #include <U8g2lib.h>
 #include <WiFi.h>
@@ -380,6 +381,23 @@ static void drawHybrid() {
     footer("hold OK: cancel");
 }
 
+static void drawUnlockPrompt(const unlock::Prompt* p) {
+    bool pairing = p->kind == unlock::PromptKind::Pair;
+    g_lcd.setFont(u8g2_font_6x10_tr);
+    g_lcd.drawBox(0, 0, W, 11);
+    g_lcd.setDrawColor(0);
+    centered(9, pairing ? "PAIR THIS PC?" : "UNLOCK PC?");
+    g_lcd.setDrawColor(1);
+    g_lcd.setFont(u8g2_font_7x13B_tr);
+    centered(28, p->name);
+    g_lcd.setFont(u8g2_font_5x7_tr);
+    char via[24];
+    snprintf(via, sizeof(via), "via %s", p->via);
+    centered(40, via);
+    if (pairing) centered(49, "Windows sign-in");
+    footer(pairing ? "OK: pair   DOWN: cancel" : "OK: unlock   DOWN: deny");
+}
+
 static void draw() {
     g_lcd.clearBuffer();
     g_lcd.setDrawColor(1);
@@ -388,6 +406,8 @@ static void draw() {
 
     if (ble::pairingPending(&code)) {
         drawPairing(code);
+    } else if (const unlock::Prompt* up = unlock::prompt()) {
+        drawUnlockPrompt(up);
     } else if (p && !(s_screen == Screen::PinEntry && s_pinPurpose == PinPurpose::CtapUv)) {
         drawPrompt(p);
     } else if (s_screen == Screen::PinEntry) {
@@ -558,6 +578,12 @@ static void handleKey(Key k) {
         else if (k == Key::Down || k == Key::Left) ble::pairingConfirm(false);
         return;
     }
+    // 1b. PC pairing / unlock
+    if (unlock::prompt()) {
+        if (k == Key::Ok) unlock::userApprove();
+        else if (k == Key::Down || k == Key::Left) unlock::userDeny();
+        return;
+    }
     // 2. FIDO prompt
     const CtapPrompt* p = ctap::prompt();
     if (p) {
@@ -696,7 +722,7 @@ void otaProgress(unsigned done, unsigned total) {
 
 void loop() {
     Key k = buttons::poll();
-    bool attention = ctap::prompt() || ble::pairingPending(nullptr);
+    bool attention = ctap::prompt() || ble::pairingPending(nullptr) || unlock::prompt();
 
     if (k != Key::None) {
         s_lastInput = millis();

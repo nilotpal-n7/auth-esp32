@@ -10,6 +10,7 @@
 #include "transport/ble.h"
 #include "transport/hybrid.h"
 #include "util/codec.h"
+#include "unlock/unlock.h"
 
 #include <WiFi.h>
 
@@ -58,6 +59,7 @@ static void help() {
         "  time | time set <unix>      show / set UTC clock\n"
         "  tz <POSIX TZ>               clock timezone, e.g. IST-5:30, CET-1CEST,M3.5.0,M10.5.0/3\n"
         "  passkeys | passkey del <n>  list / delete discoverable credentials\n"
+        "  unlock list | unlock remove <n>   PCs paired for Windows sign-in\n"
         "  pin                         device PIN status (set it on the device)\n"
         "  auto on|off                 hands-free sign-in + registration (no OK/PIN)\n"
         "  hybrid <FIDO:/...> | hybrid stop   phone-style login from a QR string\n"
@@ -154,6 +156,52 @@ static void cmdWifi(int argc, char** argv) {
     }
 }
 
+// --- PC unlock (Windows sign-in) -------------------------------------------
+static void serialUnlockReply(bool ok, const uint8_t* mac, void* ctx) {
+    bool pairing = ctx != nullptr;
+    if (!ok) { consoleWrite(pairing ? "ERR pairing denied\n" : "ERR denied\n"); return; }
+    if (pairing) { consoleWrite("OK paired\n"); return; }
+    char hex[65];
+    hexEncode(mac, 32, hex);
+    consolef("UNLOCK %s\n", hex);
+}
+
+static void cmdUnlock(int argc, char** argv) {
+    const char* sub = argc > 1 ? argv[1] : "list";
+    if (!strcmp(sub, "list")) {
+        char name[24];
+        int n = 0;
+        for (int i = 0; i < UNLOCK_MAX_PCS; i++) {
+            if (unlock::name(i, name, sizeof(name))) { consolef("  %d: %s\n", i, name); n++; }
+        }
+        if (!n) consoleWrite("  (none)\n");
+    } else if (!strcmp(sub, "remove") && argc >= 3) {
+        consoleWrite(unlock::remove(atoi(argv[2])) ? "OK\n" : "ERR no such PC\n");
+    } else if (!strcmp(sub, "pair") && argc >= 5) {
+        // unlock pair <pc-id hex16> <key hex64> <name>  (confirmed on the device)
+        uint8_t id[UNLOCK_PC_ID_LEN], key[UNLOCK_KEY_LEN];
+        if (hexDecode(argv[2], strlen(argv[2]), id, sizeof(id)) != UNLOCK_PC_ID_LEN ||
+            hexDecode(argv[3], strlen(argv[3]), key, sizeof(key)) != UNLOCK_KEY_LEN) {
+            consoleWrite("ERR bad pairing data\n");
+            return;
+        }
+        static int pairingCtx = 1;
+        if (!unlock::pair(id, key, argv[4], "USB", serialUnlockReply, &pairingCtx)) consoleWrite("ERR busy\n");
+        crypto::wipe(key, sizeof(key));
+    } else if (argc >= 3) {
+        // unlock <pc-id hex16> <challenge hex64>
+        uint8_t id[UNLOCK_PC_ID_LEN], chal[UNLOCK_CHAL_LEN];
+        if (hexDecode(argv[1], strlen(argv[1]), id, sizeof(id)) != UNLOCK_PC_ID_LEN ||
+            hexDecode(argv[2], strlen(argv[2]), chal, sizeof(chal)) != UNLOCK_CHAL_LEN) {
+            consoleWrite("ERR bad request\n");
+            return;
+        }
+        unlock::respond(id, chal, sizeof(chal), "USB", serialUnlockReply, nullptr);
+    } else {
+        consoleWrite("ERR usage: unlock list|remove <n>\n");
+    }
+}
+
 static void cmdPasskeys(int argc, char** argv) {
     if (argc >= 3 && !strcmp(argv[1], "del")) {
         consoleWrite(creds::residentDelete(atoi(argv[2])) ? "OK\n" : "ERR no such slot\n");
@@ -200,6 +248,7 @@ static void execute(char* line) {
     else if (!strcmp(cmd, "totp")) cmdTotp(argc, argv);
     else if (!strcmp(cmd, "wifi")) cmdWifi(argc, argv);
     else if (!strcmp(cmd, "passkeys") || !strcmp(cmd, "passkey")) cmdPasskeys(argc, argv);
+    else if (!strcmp(cmd, "unlock")) cmdUnlock(argc, argv);
     else if (!strcmp(cmd, "ctap")) cmdCtap(argc, argv);
 #ifdef AUTHKEY_TEST_HOOKS
     // Test builds only: lets the PC harness stand in for the buttons. Never

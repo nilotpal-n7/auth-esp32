@@ -1,0 +1,4 @@
+LIBRARY AuthKeyProvider
+EXPORTS
+    DllCanUnloadNow   PRIVATE
+    DllGetClassObject PRIVATE

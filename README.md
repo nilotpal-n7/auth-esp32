@@ -103,6 +103,36 @@ Set a 4–8 digit PIN in **Menu → Device PIN**. Sites that ask for user
 verification then make you enter the PIN on the device. After 8 wrong
 attempts, user verification is blocked until you reset the passkeys.
 
+### Windows sign-in (unlock the PC)
+
+The device can sign you in to Windows: wake the lock screen and, if the
+AuthKey is reachable, you're signed in without a PIN, face or password.
+It works over **USB, Bluetooth and WiFi**, whichever answers first.
+
+```powershell
+pc\build.ps1                      # builds pc\bin (Visual Studio C++ tools + .NET 9 SDK)
+# then, in an Administrator PowerShell, with the device on USB:
+pc\install.ps1                    # installs, pairs (press OK on the device), tests
+```
+
+Pairing asks for your Windows account **password**. For a Microsoft account
+that's the account.microsoft.com password, not the Hello PIN. It is stored
+encrypted (DPAPI) in `C:\ProgramData\AuthKey`, readable only by SYSTEM and
+Administrators, and is released to the lock screen only after the device
+answers a fresh random challenge (HMAC-SHA256 with a per-PC key).
+
+- With auto-approve **on**, the device answers by itself. With it **off**, the
+  OLED asks "UNLOCK PC?" and you press OK.
+- USB means "unlocked whenever plugged in". Bluetooth gives walk-away locking
+  (about 10 m). WiFi works whenever the device is on the same network. Turn
+  transports on or off with
+  `"C:\Program Files\AuthKey\AuthKeyUnlock.exe" set usb|bluetooth|wifi on|off`.
+- Your normal PIN, face and password sign-in stay available. If Windows ever
+  rejects the stored password (e.g. you changed it), automatic sign-in pauses;
+  sign in normally and run `AuthKeyUnlock.exe pair` again.
+- Emergency off-switch: create the file `C:\ProgramData\AuthKey\disabled`.
+  Remove everything with `pc\uninstall.ps1 -Purge`.
+
 ## Serial console
 
 `help` lists everything. Highlights: `status`, `totp …`, `wifi add <ssid> <pass>`,

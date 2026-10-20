@@ -19,6 +19,7 @@
 #include "transport/ble.h"
 #include "transport/hybrid.h"
 #include "ui/ui.h"
+#include "unlock/unlock.h"
 
 // TLS (hybrid tunnel) and P-256 maths need more than the default 8 KB stack.
 SET_LOOP_TASK_STACK_SIZE(16 * 1024);
@@ -54,6 +55,7 @@ void setup() {
     if (!settings::init()) fatal("Settings init failed");
     totp::init();
     creds::init();
+    unlock::init();
     ctap::init();
 
     ui::bootStatus("Starting Bluetooth");
@@ -82,6 +84,7 @@ void loop() {
     if (ble::takeProvisioning(qr, sizeof(qr))) hybrid::start(qr);
 
     hybrid::loop();
+    unlock::loop();
     ctap::loop();
     ui::loop();
 

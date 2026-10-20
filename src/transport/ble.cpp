@@ -2,6 +2,7 @@
 #include "config.h"
 #include "core/log.h"
 #include "fido/ctap2.h"
+#include "unlock/unlock.h"
 
 #include <NimBLEDevice.h>
 #include <freertos/FreeRTOS.h>
@@ -20,6 +21,8 @@ static const NimBLEUUID CABLE_UUID((uint16_t)0xFFF9);
 static const NimBLEUUID PROV_SERVICE_UUID("A3C87500-8ED3-4BDF-8A39-A01BEBEDE295");
 static const NimBLEUUID PROV_WRITE_UUID("A3C87501-8ED3-4BDF-8A39-A01BEBEDE295");
 static const NimBLEUUID PROV_STATUS_UUID("A3C87502-8ED3-4BDF-8A39-A01BEBEDE295");
+// PC unlock: write pcId(8) || challenge(32); notified: status(1, 0 = ok) || mac(32)
+static const NimBLEUUID UNLOCK_UUID("A3C87503-8ED3-4BDF-8A39-A01BEBEDE295");
 
 // BLE framing commands (CTAP 2.0 §8.3.4)
 #define BLE_CMD_PING       0x81
@@ -144,6 +147,15 @@ static void applyAdvertising() {
 void startHybridAdvert(const uint8_t eid[20]) {
     memcpy(s_eid, eid, 20);
     s_hybridAdvert = true;
+    // Only one BLE link is supported and advertising stops while connected,
+    // so a lingering client (e.g. a PC that left a GATT session open) would
+    // hide the EID from the desktop. Drop it unless it is mid-CTAP request;
+    // onDisconnect() then starts the EID advert.
+    if (s_connected && !(ctap::busy() && ctap::busyTransport() == CtapTransport::Ble)) {
+        logf("BLE", "dropping idle client so the hybrid advert can run");
+        s_server->disconnect(s_connHandle);
+        return;
+    }
     applyAdvertising();
 }
 
@@ -274,6 +286,29 @@ class RevisionBitsCallbacks : public NimBLECharacteristicCallbacks {
     }
 };
 
+static NimBLECharacteristic* s_unlockChar = nullptr;
+static uint8_t       s_unlockReq[UNLOCK_PC_ID_LEN + UNLOCK_CHAL_LEN];
+static volatile bool s_unlockReady = false;
+
+class UnlockCallbacks : public NimBLECharacteristicCallbacks {
+    void onWrite(NimBLECharacteristic* c, NimBLEConnInfo&) override {
+        NimBLEAttValue v = c->getValue();
+        if (v.size() != sizeof(s_unlockReq) || s_unlockReady) return;
+        portENTER_CRITICAL(&s_mux);
+        memcpy(s_unlockReq, v.data(), sizeof(s_unlockReq));
+        s_unlockReady = true;
+        portEXIT_CRITICAL(&s_mux);
+    }
+};
+
+static void bleUnlockReply(bool ok, const uint8_t* mac, void*) {
+    uint8_t out[33] = {0};
+    out[0] = ok ? 0 : 1;
+    if (ok && mac) memcpy(out + 1, mac, 32);
+    s_unlockChar->setValue(out, sizeof(out));
+    if (s_connected) s_unlockChar->notify();
+}
+
 class ProvisionCallbacks : public NimBLECharacteristicCallbacks {
     void onWrite(NimBLECharacteristic* c, NimBLEConnInfo&) override {
         NimBLEAttValue v = c->getValue();
@@ -291,6 +326,7 @@ static ControlPointCallbacks s_cpCb;
 static CpLengthCallbacks     s_cpLenCb;
 static RevisionBitsCallbacks s_revCb;
 static ProvisionCallbacks    s_provCb;
+static UnlockCallbacks       s_unlockCb;
 
 // --- Public API --------------------------------------------------------------
 
@@ -331,6 +367,8 @@ void init() {
     s_provStatus = prov->createCharacteristic(PROV_STATUS_UUID,
                                               NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
     s_provStatus->setValue("idle");
+    s_unlockChar = prov->createCharacteristic(UNLOCK_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY);
+    s_unlockChar->setCallbacks(&s_unlockCb);
 
     NimBLEService* dis = s_server->createService((uint16_t)0x180A);
     dis->createCharacteristic((uint16_t)0x2A29, NIMBLE_PROPERTY::READ)->setValue("AuthKey");
@@ -353,6 +391,15 @@ void loop() {
     if (s_cancelRequested) {
         s_cancelRequested = false;
         ctap::cancel(CtapTransport::Ble);
+    }
+
+    if (s_unlockReady) {
+        uint8_t req[sizeof(s_unlockReq)];
+        portENTER_CRITICAL(&s_mux);
+        memcpy(req, s_unlockReq, sizeof(req));
+        s_unlockReady = false;
+        portEXIT_CRITICAL(&s_mux);
+        unlock::respond(req, req + UNLOCK_PC_ID_LEN, UNLOCK_CHAL_LEN, "Bluetooth", bleUnlockReply, nullptr);
     }
 
     if (s_msgReady) {
