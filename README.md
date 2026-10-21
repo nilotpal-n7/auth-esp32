@@ -161,19 +161,45 @@ so everything above works the same: **Security key** (Bluetooth or USB) and
 
 ### Android
 
-- **Lock and unlock:** pair AuthKey-ESP32 with the phone (it pairs as a
-  keyboard), then add it under Settings → Security & privacy → More security
-  settings → **Extend Unlock → Trusted devices**. The phone stays unlocked
-  while the AuthKey is near and connected. Walk away and it locks normally;
-  your PIN or fingerprint always works, and the trusted device only takes
-  over again once it is connected.
-- **Codes:** the keyboard types TOTP codes into apps too (above).
-- **Passkeys:** Android only uses NFC or USB security keys, and an ESP32 has
-  neither, so the AuthKey can't be picked as a "security key" on Android. An
-  experimental route: when Android shows a passkey QR ("use another device"),
-  screenshot it, copy its text with Google Lens (it starts with `FIDO:/`) and
-  paste it into the web page's **Phone sign-in** box. The AuthKey then signs
-  in like a phone. Android may close its QR dialog when you switch apps.
+Pair AuthKey-ESP32 with the phone (it pairs as a keyboard; press OK on the
+AuthKey when the codes match), then install the companion app in `android/`:
+
+```bash
+cd android
+./gradlew assembleDebug        # needs JDK 17 (Android Studio's, or set JAVA_HOME)
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+The app (Kotlin, Android 9+):
+
+- **Passkeys, Android 14+:** turn on AuthKey under *Passkey provider
+  settings*. Android's passkey sheet (Chrome, apps) then offers **AuthKey
+  security key**. The app talks CTAP to the AuthKey over **Bluetooth**, or
+  over **USB** when it's plugged into the phone (USB-C/OTG cable, CP2102
+  boards). You approve on the AuthKey as usual. Android reserves the standard
+  FIDO Bluetooth service for its system apps, so the firmware offers the same
+  channel on its own service (`A3C87504/05`), encrypted links only.
+- **Passkeys via QR, any version:** like the Windows helper, a passkey QR
+  ("Use a phone or tablet" / "Use another device") makes the AuthKey sign in
+  the way a phone would (over its WiFi). Point the app's camera at a QR on any
+  computer or phone. For a QR on the phone's own screen, use the **AuthKey
+  QR** Quick Settings tile, or share a screenshot to AuthKey. Authenticator
+  (`otpauth://`) QRs are added to the AuthKey's codes when it is on USB.
+- **Walk-away lock:** locks the phone after the AuthKey has been out of range
+  for 15 s (configurable), with the same rules as on Windows: it only locks
+  after seeing the AuthKey nearby, and unlocking with your PIN while it's
+  away doesn't lock again. Two lock methods; turn on one:
+  *Normal* (Accessibility) locks like the power button, so fingerprint still
+  works; *Strict* (device admin) needs the PIN after each lock. On Android 13+,
+  sideloaded apps need App info → ⋮ → *Allow restricted settings* first.
+- **Keep running:** the lock runs as a service with a permanent
+  notification. The app asks to be excluded from battery optimisation.
+  Samsung phones also need Settings → Battery → Background usage limits →
+  *Never sleeping apps* → AuthKey.
+
+Without the app, Android's own **Extend Unlock → Trusted devices** (Smart
+Lock) can keep the phone unlocked while the AuthKey is connected, and the
+keyboard types TOTP codes into apps too.
 
 ### Device PIN (user verification)
 
@@ -370,5 +396,6 @@ src/
   ui/                    OLED screens, buttons
   cli/                   USB serial console
 tools/                   PC helpers (QR, walk-away lock, notifications, backup) and tests
+android/                 Android app (Kotlin): passkeys over BLE/USB, QR, walk-away lock
 partitions.csv           2 × 1.875 MB OTA slots + 128 KB NVS
 ```

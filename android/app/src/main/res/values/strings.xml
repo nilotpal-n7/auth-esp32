@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AuthKey</string>
+
+    <string name="section_device">AuthKey-ESP32</string>
+    <string name="device_need_permission">Allow Nearby devices (Bluetooth) so the app can reach your AuthKey.</string>
+    <string name="device_not_paired">Not paired. Pair AuthKey-ESP32 in Bluetooth settings (the AuthKey shows a 6-digit code: press OK if it matches).</string>
+    <string name="device_paired">Paired: %1$s</string>
+    <string name="grant">Allow Bluetooth</string>
+    <string name="bt_settings">Bluetooth settings</string>
+    <string name="test">Test</string>
+    <string name="test_running">Talking to the AuthKey…</string>
+    <string name="test_ok">Works over %1$s: %2$s, passkeys (rk) %3$s, device PIN (uv) %4$s</string>
+    <string name="test_failed">Didn\'t work: %1$s</string>
+
+    <string name="section_passkeys">Passkeys</string>
+    <string name="provider_info">Turn on AuthKey as a passkey provider: Android then offers \"AuthKey security key\" whenever a site or app asks for a passkey. The app talks to the AuthKey over Bluetooth, or over USB when it is plugged into the phone; you approve on the AuthKey\'s screen.</string>
+    <string name="provider_unavailable">Android only lets apps provide passkeys from Android 14 on; this phone is older. Use the QR routes below instead: on a passkey screen choose \"Use another device\" so it shows a QR code.</string>
+    <string name="provider_settings">Passkey provider settings</string>
+    <string name="qr_info">QR codes, like the Windows helper: a passkey QR (\"Use a phone or tablet\" / \"Use another device\") makes the AuthKey sign in like a phone, over its WiFi. Scan a QR on another screen with the camera. For a QR on this phone\'s screen, add the \"AuthKey QR\" tile to Quick Settings and tap it, or share a screenshot to AuthKey. Authenticator (otpauth) QRs are added to the AuthKey\'s codes when it is plugged in over USB.</string>
+    <string name="scan">Scan a QR with the camera</string>
+
+    <string name="section_lock">Walk-away lock</string>
+    <string name="lock_info">Locks the phone when the AuthKey has been out of range for a while. It only locks after seeing the AuthKey nearby, and each lock pauses it until the AuthKey is back, so unlocking with your PIN while the AuthKey is away doesn\'t lock again.</string>
+    <string name="lock_switch">Lock when the AuthKey is away</string>
+    <string name="lock_normal">Normal lock…</string>
+    <string name="lock_strict">Strict lock…</string>
+    <string name="lock_methods_info">Turn on one: Normal (Accessibility → AuthKey) locks like the power button, fingerprint still works. Strict (device admin) needs your PIN after each lock. On Android 13+, if Accessibility is greyed out: App info → ⋮ → Allow restricted settings.</string>
+    <string name="lock_status">Lock: %1$s · method: %2$s</string>
+    <string name="lock_method_normal">normal</string>
+    <string name="lock_method_strict">strict</string>
+    <string name="lock_method_none">none enabled</string>
+    <string name="lock_off">off</string>
+    <string name="away_hint">Seconds away</string>
+    <string name="rssi_hint">Signal limit (dBm)</string>
+    <string name="save">Save</string>
+    <string name="lock_tuning">Seconds away: how long the AuthKey must be gone (default 15). Signal limit: weaker counts as away (default -85; try -75 to lock sooner). Android 11 and older also need Location turned on for Bluetooth scanning.</string>
+    <string name="lock_strict_explain">Lets AuthKey lock the screen when your AuthKey-ESP32 goes out of range. Nothing else.</string>
+    <string name="lock_channel">Walk-away lock</string>
+    <string name="lock_title">AuthKey walk-away lock</string>
+    <string name="lock_waiting">Waiting for the AuthKey to be nearby</string>
+    <string name="lock_armed">Armed · AuthKey nearby (%1$d dBm)</string>
+    <string name="lock_no_method">Turn on Normal or Strict lock in the app</string>
+    <string name="a11y_description">Locks the screen when your AuthKey-ESP32 goes out of range. AuthKey reads nothing on your screen.</string>
+
+    <string name="passkey_connecting">Connecting to the AuthKey…</string>
+    <string name="passkey_press_ok">Press OK on the AuthKey (via %1$s)</string>
+    <string name="passkey_choose">Which account?</string>
+
+    <string name="scan_hint">Point at a passkey or authenticator QR code</string>
+    <string name="scan_need_camera">Camera permission is needed to scan.</string>
+    <string name="scan_found_passkey">Passkey QR found, sending to the AuthKey…</string>
+    <string name="scan_found_totp">Authenticator QR found, sending to the AuthKey…</string>
+    <string name="screen_channel">Screen QR</string>
+    <string name="screen_looking">Looking for a QR on the screen…</string>
+    <string name="screen_no_qr">No passkey QR found on the screen. If the app hides its screen, scan it from another device or share a screenshot.</string>
+    <string name="tile_label">AuthKey QR</string>
+    <string name="share_unreadable">Could not open that image.</string>
+    <string name="provider_label">AuthKey</string>
+
+    <string name="section_background">Keep running in the background</string>
+    <string name="battery_allow">Stop battery optimisation</string>
+    <string name="notifications">Notifications</string>
+    <string name="app_battery">App info → Battery</string>
+    <string name="background_status">Battery optimisation: %1$s · Notifications: %2$s</string>
+    <string name="bg_ok">off (good)</string>
+    <string name="bg_on">ON: Android may stop the lock</string>
+    <string name="notif_on">on</string>
+    <string name="notif_off">OFF: the lock can\'t keep running</string>
+    <string name="background_info">The walk-away lock runs as a service with a small permanent notification; Android keeps such services alive, but battery savers can still stop them. Samsung: App info → Battery → Unrestricted, and Settings → Battery → Background usage limits → Never sleeping apps → add AuthKey. Don\'t swipe the notification channel off.</string>
+</resources>

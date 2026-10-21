@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="16dp">
+
+        <!-- Device -->
+        <TextView style="@style/Section" android:text="@string/section_device" />
+        <TextView android:id="@+id/deviceStatus" style="@style/Body" />
+        <LinearLayout style="@style/Row">
+            <Button android:id="@+id/grant" style="@style/Btn" android:text="@string/grant" />
+            <Button android:id="@+id/btSettings" style="@style/BtnOutlined" android:text="@string/bt_settings" />
+            <Button android:id="@+id/test" style="@style/BtnOutlined" android:text="@string/test" />
+        </LinearLayout>
+        <TextView android:id="@+id/testResult" style="@style/Small" />
+
+        <!-- Passkeys -->
+        <TextView style="@style/Section" android:text="@string/section_passkeys" />
+        <TextView android:id="@+id/providerInfo" style="@style/Body" />
+        <Button android:id="@+id/providerSettings" style="@style/Btn" android:text="@string/provider_settings" />
+        <TextView style="@style/Body" android:text="@string/qr_info" />
+        <Button android:id="@+id/scan" style="@style/Btn" android:text="@string/scan" />
+
+        <!-- Walk-away lock -->
+        <TextView style="@style/Section" android:text="@string/section_lock" />
+        <TextView style="@style/Body" android:text="@string/lock_info" />
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/lockSwitch"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/lock_switch" />
+        <TextView android:id="@+id/lockStatus" style="@style/Small" />
+        <LinearLayout style="@style/Row">
+            <Button android:id="@+id/lockNormal" style="@style/BtnOutlined" android:text="@string/lock_normal" />
+            <Button android:id="@+id/lockStrict" style="@style/BtnOutlined" android:text="@string/lock_strict" />
+        </LinearLayout>
+        <TextView style="@style/Small" android:text="@string/lock_methods_info" />
+        <LinearLayout style="@style/Row">
+            <EditText
+                android:id="@+id/awaySeconds"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:hint="@string/away_hint"
+                android:inputType="number" />
+            <EditText
+                android:id="@+id/minRssi"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:hint="@string/rssi_hint"
+                android:inputType="numberSigned" />
+            <Button android:id="@+id/saveLock" style="@style/BtnOutlined" android:text="@string/save" />
+        </LinearLayout>
+        <TextView style="@style/Small" android:text="@string/lock_tuning" />
+
+        <!-- Keep running in the background -->
+        <TextView style="@style/Section" android:text="@string/section_background" />
+        <TextView android:id="@+id/backgroundStatus" style="@style/Body" />
+        <LinearLayout style="@style/Row">
+            <Button android:id="@+id/battery" style="@style/Btn" android:text="@string/battery_allow" />
+            <Button android:id="@+id/notifications" style="@style/BtnOutlined" android:text="@string/notifications" />
+        </LinearLayout>
+        <Button android:id="@+id/appSettings" style="@style/BtnOutlined" android:text="@string/app_battery" />
+        <TextView style="@style/Small" android:text="@string/background_info" />
+    </LinearLayout>
+</ScrollView>

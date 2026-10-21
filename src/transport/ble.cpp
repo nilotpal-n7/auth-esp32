@@ -26,6 +26,11 @@ static const NimBLEUUID PROV_WRITE_UUID("A3C87501-8ED3-4BDF-8A39-A01BEBEDE295");
 static const NimBLEUUID PROV_STATUS_UUID("A3C87502-8ED3-4BDF-8A39-A01BEBEDE295");
 // PC unlock: write pcId(8) || challenge(32); notified: status(1, 0 = ok) || mac(32)
 static const NimBLEUUID UNLOCK_UUID("A3C87503-8ED3-4BDF-8A39-A01BEBEDE295");
+// The same CTAP channel as the FIDO service, under our own UUIDs: Android and
+// Windows reserve service 0xFFFD for their system security-key code, so apps
+// (the Android companion app) use these. Same framing; encrypted links only.
+static const NimBLEUUID CTAP_CP_UUID("A3C87504-8ED3-4BDF-8A39-A01BEBEDE295");
+static const NimBLEUUID CTAP_STATUS_UUID("A3C87505-8ED3-4BDF-8A39-A01BEBEDE295");
 
 // BLE framing commands (CTAP 2.0 §8.3.4)
 #define BLE_CMD_PING       0x81
@@ -44,6 +49,8 @@ static const NimBLEUUID UNLOCK_UUID("A3C87503-8ED3-4BDF-8A39-A01BEBEDE295");
 
 static NimBLEServer*         s_server = nullptr;
 static NimBLECharacteristic* s_status = nullptr;
+static NimBLECharacteristic* s_appStatus = nullptr;   // status for the app channel
+static volatile bool         s_fidoApp = false;       // current FIDO client uses the app channel
 static NimBLECharacteristic* s_cpLength = nullptr;
 static NimBLECharacteristic* s_provStatus = nullptr;
 static NimBLECharacteristic* s_kbdInput = nullptr;     // null when the keyboard is off
@@ -104,7 +111,7 @@ static bool fidoLinkUp() { return s_fidoConn != BLE_HS_CONN_HANDLE_NONE; }
 
 static void notifyFragment(const uint8_t* data, size_t len) {
     for (int attempt = 0; attempt < 50 && fidoLinkUp(); attempt++) {
-        if (s_status->notify(data, len, s_fidoConn)) return;
+        if ((s_fidoApp ? s_appStatus : s_status)->notify(data, len, s_fidoConn)) return;
         delay(5);   // out of mbufs: wait for the controller to drain
     }
 }
@@ -241,6 +248,10 @@ class ServerCallbacks : public NimBLEServerCallbacks {
 };
 
 class ControlPointCallbacks : public NimBLECharacteristicCallbacks {
+public:
+    explicit ControlPointCallbacks(bool app) : m_app(app) {}
+private:
+    bool m_app;
     void onWrite(NimBLECharacteristic* c, NimBLEConnInfo& info) override {
         NimBLEAttValue v = c->getValue();
         const uint8_t* d = v.data();
@@ -248,7 +259,8 @@ class ControlPointCallbacks : public NimBLECharacteristicCallbacks {
         if (n == 0) return;
 
         portENTER_CRITICAL(&s_mux);
-        if (info.getConnHandle() != s_fidoConn) {
+        if (info.getConnHandle() != s_fidoConn || m_app != s_fidoApp) {
+            s_fidoApp = m_app;
             // Another central started talking FIDO: it owns the transport now.
             s_fidoConn = info.getConnHandle();
             s_fidoMtu = info.getMTU();
@@ -366,7 +378,8 @@ class KeyboardCallbacks : public NimBLECharacteristicCallbacks {
 };
 
 static ServerCallbacks       s_serverCb;
-static ControlPointCallbacks s_cpCb;
+static ControlPointCallbacks s_cpCb(false);
+static ControlPointCallbacks s_appCpCb(true);
 static CpLengthCallbacks     s_cpLenCb;
 static RevisionBitsCallbacks s_revCb;
 static ProvisionCallbacks    s_provCb;
@@ -427,6 +440,9 @@ void init() {
     s_provStatus->setValue("idle");
     s_unlockChar = prov->createCharacteristic(UNLOCK_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY);
     s_unlockChar->setCallbacks(&s_unlockCb);
+    prov->createCharacteristic(CTAP_CP_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_ENC)
+        ->setCallbacks(&s_appCpCb);
+    s_appStatus = prov->createCharacteristic(CTAP_STATUS_UUID, NIMBLE_PROPERTY::NOTIFY);
 
     // Device Information (the HID helper creates the service when the
     // keyboard is on; only one 0x180A may exist).

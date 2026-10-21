@@ -4,8 +4,10 @@
 // Services:
 //   0xFFFD  FIDO (CTAP over BLE, FIDO CTAP 2.0 §8.3). Encrypted + bonded,
 //           LE Secure Connections with numeric comparison on the OLED.
-//   A3C87500-… AuthKey hybrid provisioning: tools/qr_bridge.py (PC) writes
-//           the "FIDO:/…" QR text here; status is notified back.
+//   A3C87500-… AuthKey service: hybrid provisioning (tools/qr_bridge.py and
+//           the Android app write the "FIDO:/…" QR text, status is notified
+//           back), PC unlock, and the FIDO channel again (…04 / …05) for apps,
+//           since Android and Windows reserve 0xFFFD for system code.
 //   0x1812  HID keyboard (optional, settings::keyboard()): types TOTP codes
 //           into the paired PC or phone. Bonding also lets Android treat the
 //           device as a trusted device (Extend Unlock).
