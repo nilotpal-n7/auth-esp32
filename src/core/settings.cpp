@@ -11,6 +11,7 @@ static uint8_t  s_masterKey[32];
 static uint32_t s_counter = 0;
 static bool     s_autoApprove = false;
 static char     s_tz[48] = DEFAULT_TZ;
+static bool     s_portalAuto = true;
 
 // PIN record: salt(16) || SHA256(salt || pin)(32)
 static uint8_t  s_pinRecord[48];
@@ -32,6 +33,7 @@ bool init() {
     }
     s_counter     = s_prefs.getUInt("ctr", 0);
     s_autoApprove = s_prefs.getBool("auto", false);
+    s_portalAuto  = s_prefs.getBool("portal", true);
     if (s_prefs.isKey("tz")) s_prefs.getString("tz", s_tz, sizeof(s_tz));
     if (s_tz[0] == '\0') strlcpy(s_tz, DEFAULT_TZ, sizeof(s_tz));
     s_pinSet      = s_prefs.isKey("pin") &&
@@ -45,6 +47,12 @@ bool autoApprove() { return s_autoApprove; }
 void setAutoApprove(bool on) {
     s_autoApprove = on;
     s_prefs.putBool("auto", on);
+}
+
+bool portalAuto() { return s_portalAuto; }
+void setPortalAuto(bool on) {
+    s_portalAuto = on;
+    s_prefs.putBool("portal", on);
 }
 
 const char* timezone() { return s_tz; }

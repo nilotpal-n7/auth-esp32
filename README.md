@@ -50,7 +50,8 @@ WiFi is used for the clock (NTP), for hybrid sign-ins, and for optional OTA
 updates. Without WiFi, TOTP still works once the clock is set (`time set <unix>`).
 
 All secrets live in `.env` (git-ignored): `WIFI_<n>_SSID` / `WIFI_<n>_PASSWORD`,
-`OTA_PASSWORD` and `OTA_HOST`. `scripts/env_secrets.py` reads it at build
+`OTA_PASSWORD`, `OTA_HOST` and `IITG_USERNAME` / `IITG_PASSWORD` (campus
+auto-login, below). `scripts/env_secrets.py` reads it at build
 time, so nothing secret is kept in `src/`.
 
 **Updates over WiFi (OTA):** set `OTA_PASSWORD` in `.env`, flash once over
@@ -165,10 +166,35 @@ answers a fresh random challenge (HMAC-SHA256 with a per-PC key).
 - Emergency off-switch: create the file `C:\ProgramData\AuthKey\disabled`.
   Remove everything with `pc\uninstall.ps1 -Purge`.
 
+### Campus WiFi auto-login (IITG)
+
+IIT Guwahati's firewall (`agnigarh.iitg.ac.in:1442`) signs you out after a
+while unless the login page is kept open. With `IITG_USERNAME` /
+`IITG_PASSWORD` in `.env`, the device does that job for the whole network
+behind your router:
+
+- Every 2 min it checks the internet. If it's down, it logs in (it fetches a
+  fresh form from `/login?` and posts it, as the browser does). If it's up
+  through someone else's login, it takes the session over so it can keep it.
+- It refreshes its session every 20 min (`/keepalive`), well inside the
+  30-min window, so the network never drops.
+- The portal's certificate is verified (DigiCert root), so the password is
+  only ever sent to the real portal. It is never logged.
+- "Session limit" replies make it wait and retry every 5 min until a slot is
+  free. Rejected logins back off to every 30 min after 3 tries (no lockout).
+- If NTP is blocked while logged out, the clock is taken from the HTTP `Date`
+  header.
+
+**Menu → Campus net** shows the state, last result and refresh countdown,
+and has **Login now**, **Logout** (pauses auto-login until you log in
+again) and the **Auto-login ON/off** switch. The status bar shows `!NET`
+while the network needs a login. Serial: `portal status|login|logout|on|off`;
+every login, drop and failure is in the event log.
+
 ## Serial console
 
 `help` lists everything. Highlights: `status`, `totp …`, `wifi add <ssid> <pass>`,
-`passkeys`, `tz <POSIX TZ>`, `auto on|off`, `hybrid <FIDO:/…>`, `log`.
+`passkeys`, `tz <POSIX TZ>`, `auto on|off`, `hybrid <FIDO:/…>`, `portal …`, `log`.
 
 ## Security notes
 
@@ -218,7 +244,7 @@ src/
   fido/                  CTAP 2.0 engine, credential derivation & storage
   transport/ble.*        NimBLE: FIDO BLE service, pairing, hybrid adverts
   transport/hybrid.*     caBLE v2: tunnel, Noise KNpsk0, encrypted CTAP
-  net/                   WiFi/NTP/OTA, WebSocket client, tunnel root CAs
+  net/                   WiFi/NTP/OTA, campus portal login, WebSocket client, root CAs
   totp/                  TOTP storage and generation
   ui/                    OLED screens, buttons
   cli/                   USB serial console

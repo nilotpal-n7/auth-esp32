@@ -14,6 +14,8 @@ bool autoApprove();               // Hands-free sign-in and registration (no OK,
 void setAutoApprove(bool on);
 const char* timezone();           // POSIX TZ string for the on-screen clock
 void setTimezone(const char* tz);
+bool portalAuto();                // Captive-portal auto-login (default on)
+void setPortalAuto(bool on);
 
 // --- FIDO device secrets ---
 // 32-byte master secret used to derive every credential private key.

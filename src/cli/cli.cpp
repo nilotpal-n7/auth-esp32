@@ -6,6 +6,7 @@
 #include "fido/credentials.h"
 #include "fido/ctap2.h"
 #include "net/network.h"
+#include "net/portal.h"
 #include "totp/totp.h"
 #include "transport/ble.h"
 #include "transport/hybrid.h"
@@ -55,6 +56,7 @@ static void help() {
         "  approve | deny | uvpin <pin> | setpin <pin> | clearpin   (test build only)\n"
 #endif
         "  wifi list | wifi add <ssid> <password> | wifi del <n>\n"
+        "  portal status|on|off|login|logout   IITG captive-portal auto-login\n"
         "  wifi connect | wifi reset   reconnect | restore the .env list\n"
         "  time | time set <unix>      show / set UTC clock\n"
         "  tz <POSIX TZ>               clock timezone, e.g. IST-5:30, CET-1CEST,M3.5.0,M10.5.0/3\n"
@@ -92,6 +94,10 @@ static void status() {
     else consoleWrite("  Session:   locked (next verified request asks for the PIN)\n");
     consolef("  Hybrid:    %s\n", hybrid::stateText());
     consolef("  OTA:       %s\n", network::otaEnabled() ? "enabled" : "disabled (no password)");
+    if (portal::haveCredentials()) {
+        consolef("  Portal:    %s (%s), auto %s, %s\n", portal::stateStr(), portal::user(),
+                 portal::enabled() ? "on" : "off", portal::lastResult());
+    }
     consolef("  Heap:      %u free\n", (unsigned)ESP.getFreeHeap());
 }
 
@@ -158,6 +164,30 @@ static void cmdWifi(int argc, char** argv) {
         consoleWrite(network::ensureConnected() ? "OK connected\n" : "ERR could not connect\n");
     } else {
         consoleWrite("ERR usage: wifi list|add|del|connect|reset\n");
+    }
+}
+
+static void cmdPortal(int argc, char** argv) {
+    const char* sub = argc > 1 ? argv[1] : "status";
+    if (!strcmp(sub, "status")) {
+        if (!portal::haveCredentials()) { consoleWrite("  no IITG credentials in .env\n"); return; }
+        consolef("  state:    %s%s\n", portal::stateStr(), portal::paused() ? " (paused)" : "");
+        consolef("  user:     %s, auto-login %s\n", portal::user(), portal::enabled() ? "on" : "off");
+        consolef("  last:     %s\n", portal::lastResult());
+        consolef("  session:  %s, next %s in %lus\n", portal::ownsSession() ? "ours" : "not ours",
+                 portal::ownsSession() && portal::online() ? "refresh" : "check",
+                 (unsigned long)portal::secondsToNext());
+        consolef("  counters: %d login(s), %d refresh(es)\n", portal::logins(), portal::keepalives());
+    } else if (!strcmp(sub, "on")) {
+        portal::setEnabled(true);  consoleWrite("OK auto-login on\n");
+    } else if (!strcmp(sub, "off")) {
+        portal::setEnabled(false); consoleWrite("OK auto-login off\n");
+    } else if (!strcmp(sub, "login")) {
+        portal::loginNow();        consoleWrite("OK logging in (see `portal` / `log`)\n");
+    } else if (!strcmp(sub, "logout")) {
+        portal::logout();          consoleWrite("OK logging out; auto-login paused until `portal login`\n");
+    } else {
+        consoleWrite("ERR usage: portal status|on|off|login|logout\n");
     }
 }
 
@@ -257,6 +287,7 @@ static void execute(char* line) {
     else if (!strcmp(cmd, "status")) status();
     else if (!strcmp(cmd, "totp")) cmdTotp(argc, argv);
     else if (!strcmp(cmd, "wifi")) cmdWifi(argc, argv);
+    else if (!strcmp(cmd, "portal")) cmdPortal(argc, argv);
     else if (!strcmp(cmd, "passkeys") || !strcmp(cmd, "passkey")) cmdPasskeys(argc, argv);
     else if (!strcmp(cmd, "unlock")) cmdUnlock(argc, argv);
     else if (!strcmp(cmd, "ctap")) cmdCtap(argc, argv);

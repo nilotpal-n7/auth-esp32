@@ -57,6 +57,8 @@ for i in indices:
     if ssid:
         networks.append((ssid, secrets.get(f"WIFI_{i}_PASSWORD", "")))
 ota_password = secrets.get("OTA_PASSWORD", "")
+iitg_user = secrets.get("IITG_USERNAME", "")
+iitg_pass = secrets.get("IITG_PASSWORD", "")
 
 header = [
     "// Generated from .env by scripts/env_secrets.py - do not edit or commit.",
@@ -64,7 +66,9 @@ header = [
     "#define SECRET_WIFI_NETWORKS \\",
 ]
 header += [f"    {{ {c_string(s)}, {c_string(p)} }}, \\" for s, p in networks]
-header += ["", f"#define SECRET_OTA_PASSWORD {c_string(ota_password)}", ""]
+header += ["", f"#define SECRET_OTA_PASSWORD {c_string(ota_password)}"]
+header += [f"#define SECRET_IITG_USER {c_string(iitg_user)}",
+          f"#define SECRET_IITG_PASS {c_string(iitg_pass)}", ""]
 content = "\n".join(header)
 
 gen_dir = os.path.join(env.subst("$BUILD_DIR"), "secrets")  # noqa: F821
@@ -75,7 +79,8 @@ if old != content:  # rewrite only on change, so unchanged secrets don't force a
     with open(gen_file, "w", encoding="utf-8", newline="\n") as f:
         f.write(content)
 env.Prepend(CPPPATH=[gen_dir])  # noqa: F821
-print(f"env_secrets: {len(networks)} WiFi network(s), OTA {'enabled' if ota_password else 'disabled'}")
+print(f"env_secrets: {len(networks)} WiFi network(s), OTA {'enabled' if ota_password else 'disabled'}, "
+      f"IITG portal {'set' if (iitg_user and iitg_pass) else 'off'}")
 
 # OTA uploads: password and host come from .env too.
 if env.subst("$UPLOAD_PROTOCOL") == "espota":  # noqa: F821

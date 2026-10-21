@@ -47,6 +47,26 @@
 #define WIFI_MAX_SAVED          8
 #define WIFI_CONNECT_TIMEOUT_MS 10000
 
+// --- Captive portal (IITG FortiGate auto-login) ------------------------------
+// Credentials come from .env (IITG_USERNAME / IITG_PASSWORD -> authkey_secrets.h).
+#ifndef SECRET_IITG_USER
+#define SECRET_IITG_USER ""
+#endif
+#ifndef SECRET_IITG_PASS
+#define SECRET_IITG_PASS ""
+#endif
+#define PORTAL_HOST             "agnigarh.iitg.ac.in"
+#define PORTAL_PORT             1442
+#define PORTAL_PROBE_HOST       "detectportal.firefox.com"
+#define PORTAL_PROBE_PATH       "/success.txt"
+#define PORTAL_PROBE_OK         "success"      // body returned when internet is up
+#define PORTAL_PROBE_SECS       120            // re-check internet this often
+#define PORTAL_KEEPALIVE_SECS   1200           // refresh the session (< the 1800 s window)
+#define PORTAL_RETRY_SECS       30             // retry after a network / unknown failure
+#define PORTAL_LIMIT_RETRY_SECS 300            // "session limit": wait for it to free up, retry forever
+#define PORTAL_CRED_BACKOFF_SECS 1800          // after repeated rejections (avoids account lockout)
+#define PORTAL_MAX_FAILS        3              // rejections before the long back-off
+
 // --- TOTP --------------------------------------------------------------------
 #define TOTP_MAX_ACCOUNTS   24
 

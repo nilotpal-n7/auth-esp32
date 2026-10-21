@@ -15,6 +15,7 @@
 #include "fido/credentials.h"
 #include "fido/ctap2.h"
 #include "net/network.h"
+#include "net/portal.h"
 #include "totp/totp.h"
 #include "transport/ble.h"
 #include "transport/hybrid.h"
@@ -64,6 +65,7 @@ void setup() {
     ui::bootStatus("Starting WiFi");
     network::init();
     network::setOtaProgressHandler(ui::otaProgress);
+    portal::init();
 
     cli::init();
     logEvent("Boot v" FW_VERSION);
@@ -77,6 +79,7 @@ void loop() {
     cli::loop();
     ble::loop();
     network::loop();
+    portal::loop();
     if (network::otaActive()) return;   // ArduinoOTA drives the screen itself
 
     // Hybrid QR text delivered over BLE (tools/qr_bridge.py).

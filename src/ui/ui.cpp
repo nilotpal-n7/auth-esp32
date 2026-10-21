@@ -6,6 +6,7 @@
 #include "fido/credentials.h"
 #include "fido/ctap2.h"
 #include "net/network.h"
+#include "net/portal.h"
 #include "totp/totp.h"
 #include "transport/ble.h"
 #include "transport/hybrid.h"
@@ -26,7 +27,8 @@ static U8G2_SSD1306_128X64_NONAME_F_HW_I2C g_lcd(U8G2_R0, U8X8_PIN_NONE);
 static const int W = 128;
 
 enum class Screen : uint8_t {
-    Home, Menu, Passkeys, PasskeyDetail, PinMenu, PinEntry, Wifi, Bluetooth, Log, Info, ConfirmReset,
+    Home, Menu, Passkeys, PasskeyDetail, PinMenu, PinEntry, Wifi, Portal, Bluetooth, Log, Info,
+    ConfirmReset,
 };
 
 enum class PinPurpose : uint8_t { CtapUv, SetNew, SetConfirm, ChangeOld, RemoveOld };
@@ -35,6 +37,7 @@ static Screen   s_screen = Screen::Home;
 static int      s_totpIndex = 0;
 static int      s_menuIndex = 0;
 static int      s_listIndex = 0;
+static int      s_portalSel = 0;
 static int      s_listSlots[FIDO_MAX_RESIDENT];
 static int      s_listCount = 0;
 static uint32_t s_lastInput = 0;
@@ -53,8 +56,8 @@ static char       s_pinFirst[FIDO_PIN_MAX_LEN + 1];
 static Screen     s_pinReturn = Screen::Menu;
 
 static const char* MENU_ITEMS[] = {
-    "Passkeys", "Auto-approve", "Device PIN", "WiFi", "Bluetooth", "Event log", "Device info",
-    "Reset passkeys", "Back",
+    "Passkeys", "Auto-approve", "Device PIN", "WiFi", "Campus net", "Bluetooth", "Event log",
+    "Device info", "Reset passkeys", "Back",
 };
 static const int MENU_COUNT = sizeof(MENU_ITEMS) / sizeof(MENU_ITEMS[0]);
 
@@ -83,6 +86,8 @@ static void statusBar() {
     };
     right(ble::connected() ? (ble::secured() ? "BT*" : "BT") : "bt");
     right(network::connected() ? "WiFi" : "----");
+    // Campus portal: flag when the network needs a login we haven't managed.
+    if (portal::haveCredentials() && network::connected() && !portal::online()) right("!NET");
     if (settings::autoApprove()) right("AUTO");
     if (hybrid::state() != hybrid::State::Idle) right("HY");
     g_lcd.drawHLine(0, 9, W);
@@ -172,6 +177,10 @@ static const char* menuItemText(int i) {
     }
     if (i == 2) {
         snprintf(buf, sizeof(buf), "Device PIN: %s", settings::pinIsSet() ? "set" : "none");
+        return buf;
+    }
+    if (i == 4 && portal::haveCredentials()) {
+        snprintf(buf, sizeof(buf), "Campus: %s", portal::stateStr());
         return buf;
     }
     return MENU_ITEMS[i];
@@ -267,6 +276,51 @@ static void drawWifi() {
     snprintf(line, sizeof(line), "%d saved network(s)", network::savedCount());
     g_lcd.drawStr(0, 47, line);
     footer("OK: reconnect  DOWN: back");
+}
+
+static const char* portalAction(int i) {
+    switch (i) {
+        case 0: return "Login now";
+        case 1: return "Logout";
+        case 2: return portal::enabled() ? "Auto-login: ON" : "Auto-login: off";
+        default: return "Back";
+    }
+}
+
+static void drawPortal() {
+    g_lcd.setFont(u8g2_font_6x10_tr);
+    g_lcd.drawStr(0, 8, "Campus net");
+    g_lcd.setFont(u8g2_font_5x7_tr);
+    const char* mode = portal::enabled() ? (portal::paused() ? "PAUSED" : "AUTO") : "MANUAL";
+    g_lcd.drawStr(W - g_lcd.getStrWidth(mode), 8, mode);
+    g_lcd.drawHLine(0, 10, W);
+
+    char line[40];
+    if (!portal::haveCredentials()) {
+        g_lcd.drawStr(0, 21, "No IITG credentials.");
+        g_lcd.drawStr(0, 30, "Set IITG_USERNAME and");
+        g_lcd.drawStr(0, 39, "IITG_PASSWORD in .env");
+    } else {
+        snprintf(line, sizeof(line), "State: %s", portal::stateStr());
+        g_lcd.drawStr(0, 19, line);
+        snprintf(line, sizeof(line), "User:  %s", portal::user());
+        g_lcd.drawStr(0, 27, line);
+        g_lcd.drawStr(0, 35, portal::lastResult()[0] ? portal::lastResult() : "-");
+        uint32_t s = portal::secondsToNext();
+        if (portal::online() && portal::ownsSession())
+            snprintf(line, sizeof(line), "Refresh %lu:%02lu  in:%d", (unsigned long)(s / 60),
+                     (unsigned long)(s % 60), portal::logins());
+        else
+            snprintf(line, sizeof(line), "Next check %lus  in:%d", (unsigned long)s, portal::logins());
+        g_lcd.drawStr(0, 43, line);
+    }
+    // Action selector
+    g_lcd.drawBox(0, 46, W, 10);
+    g_lcd.setDrawColor(0);
+    snprintf(line, sizeof(line), "< %s >", portalAction(s_portalSel));
+    centered(54, line);
+    g_lcd.setDrawColor(1);
+    footer("U/D choose  OK do  hold OK back");
 }
 
 static void drawBluetooth() {
@@ -432,6 +486,7 @@ static void draw() {
                 break;
             }
             case Screen::Wifi: drawWifi(); break;
+            case Screen::Portal: drawPortal(); break;
             case Screen::Bluetooth: drawBluetooth(); break;
             case Screen::Log: drawLog(); break;
             case Screen::Info: drawInfo(); break;
@@ -560,10 +615,11 @@ static void openMenuItem(int i) {
             break;
         case 2: s_listIndex = 0; s_screen = Screen::PinMenu; break;
         case 3: s_screen = Screen::Wifi; break;
-        case 4: s_screen = Screen::Bluetooth; break;
-        case 5: s_listIndex = 0; s_screen = Screen::Log; break;
-        case 6: s_screen = Screen::Info; break;
-        case 7: s_screen = Screen::ConfirmReset; break;
+        case 4: s_portalSel = 0; s_screen = Screen::Portal; break;
+        case 5: s_screen = Screen::Bluetooth; break;
+        case 6: s_listIndex = 0; s_screen = Screen::Log; break;
+        case 7: s_screen = Screen::Info; break;
+        case 8: s_screen = Screen::ConfirmReset; break;
         default: s_screen = Screen::Home; break;
     }
 }
@@ -663,6 +719,21 @@ static void handleKey(Key k) {
         case Screen::Wifi:
             if (k == Key::Ok) { network::reconnectSoon(); toast("Reconnecting"); }
             else if (isBack(k)) s_screen = Screen::Menu;
+            break;
+        case Screen::Portal:
+            if (k == Key::Up) s_portalSel = (s_portalSel + 3) % 4;
+            else if (k == Key::Down || k == Key::Right) s_portalSel = (s_portalSel + 1) % 4;
+            else if (k == Key::OkLong || k == Key::Left) s_screen = Screen::Menu;
+            else if (k == Key::Ok) {
+                if (s_portalSel == 3) { s_screen = Screen::Menu; break; }
+                if (!portal::haveCredentials()) { toast("No credentials"); break; }
+                if (s_portalSel == 0) { portal::loginNow(); toast("Logging in..."); }
+                else if (s_portalSel == 1) { portal::logout(); toast("Logging out..."); }
+                else {
+                    portal::setEnabled(!portal::enabled());
+                    toast(portal::enabled() ? "Auto-login ON" : "Auto-login off");
+                }
+            }
             break;
         case Screen::Bluetooth:
             if (k == Key::OkLong) { ble::forgetBonds(); logEvent("BLE bonds cleared"); toast("Forgotten"); }
