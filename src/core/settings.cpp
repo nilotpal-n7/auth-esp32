@@ -12,6 +12,7 @@ static uint32_t s_counter = 0;
 static bool     s_autoApprove = false;
 static char     s_tz[48] = DEFAULT_TZ;
 static bool     s_portalAuto = true;
+static bool     s_keyboard = true;
 
 // PIN record: salt(16) || SHA256(salt || pin)(32)
 static uint8_t  s_pinRecord[48];
@@ -34,6 +35,7 @@ bool init() {
     s_counter     = s_prefs.getUInt("ctr", 0);
     s_autoApprove = s_prefs.getBool("auto", false);
     s_portalAuto  = s_prefs.getBool("portal", true);
+    s_keyboard    = s_prefs.getBool("kbd", true);
     if (s_prefs.isKey("tz")) s_prefs.getString("tz", s_tz, sizeof(s_tz));
     if (s_tz[0] == '\0') strlcpy(s_tz, DEFAULT_TZ, sizeof(s_tz));
     s_pinSet      = s_prefs.isKey("pin") &&
@@ -55,6 +57,12 @@ void setPortalAuto(bool on) {
     s_prefs.putBool("portal", on);
 }
 
+bool keyboard() { return s_keyboard; }
+void setKeyboard(bool on) {
+    s_keyboard = on;
+    s_prefs.putBool("kbd", on);
+}
+
 const char* timezone() { return s_tz; }
 void setTimezone(const char* tz) {
     strlcpy(s_tz, tz, sizeof(s_tz));
@@ -66,6 +74,16 @@ const uint8_t* masterKey() { return s_masterKey; }
 void regenerateMasterKey() {
     crypto::random(s_masterKey, sizeof(s_masterKey));
     s_prefs.putBytes("mkey", s_masterKey, sizeof(s_masterKey));
+}
+
+void restoreFido(const uint8_t master[32], uint32_t counter) {
+    memcpy(s_masterKey, master, 32);
+    s_prefs.putBytes("mkey", s_masterKey, sizeof(s_masterKey));
+    // Margin: the old device may have signed more since the backup was made.
+    uint32_t c = (counter > s_counter ? counter : s_counter) + 10000;
+    s_counter = c;
+    s_prefs.putUInt("ctr", s_counter);
+    s_uvActive = false;
 }
 
 uint32_t signCount() { return s_counter; }

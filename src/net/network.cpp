@@ -146,7 +146,7 @@ static void startOta() {
         s_otaActive = true;
         logEvent("OTA update started");
     });
-    ArduinoOTA.onEnd([]() { logEvent("OTA done, rebooting"); });
+    ArduinoOTA.onEnd([]() { logEvent("OTA done, rebooting"); logFlush(); });
     ArduinoOTA.onProgress([](unsigned done, unsigned total) {
         if (s_otaProgress) s_otaProgress(done, total);
     });

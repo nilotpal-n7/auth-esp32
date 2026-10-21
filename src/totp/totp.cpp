@@ -57,6 +57,12 @@ bool remove(int index) {
     return true;
 }
 
+void clear() {
+    s_prefs.clear();
+    s_count = 0;
+    s_prefs.putInt("n", 0);
+}
+
 uint32_t generate(const TotpAccount& a, time_t now) {
     uint64_t counter = (uint64_t)now / (a.period ? a.period : 30);
     uint8_t msg[8];

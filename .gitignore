@@ -11,3 +11,7 @@ src/secrets.h
 pc/bin/
 pc/service/bin/
 pc/service/obj/
+
+# Device backups (encrypted, but keep them out of git)
+authkey-backup*.json
+*.authkey-backup.json

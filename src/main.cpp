@@ -9,6 +9,7 @@
 
 #include "config.h"
 #include "cli/cli.h"
+#include "core/approval.h"
 #include "core/log.h"
 #include "core/settings.h"
 #include "crypto/crypto.h"
@@ -16,6 +17,7 @@
 #include "fido/ctap2.h"
 #include "net/network.h"
 #include "net/portal.h"
+#include "net/web.h"
 #include "totp/totp.h"
 #include "transport/ble.h"
 #include "transport/hybrid.h"
@@ -42,6 +44,22 @@ static void initNvs() {
     if (err != ESP_OK) fatal("NVS init failed");
 }
 
+// Why the previous run ended, for the event log ("crash", "power on", ...).
+static const char* resetReason() {
+    switch (esp_reset_reason()) {
+        case ESP_RST_POWERON:  return "power on";
+        case ESP_RST_SW:       return "restart";
+        case ESP_RST_PANIC:    return "crash";
+        case ESP_RST_INT_WDT:
+        case ESP_RST_TASK_WDT:
+        case ESP_RST_WDT:      return "watchdog";
+        case ESP_RST_BROWNOUT: return "brownout";
+        case ESP_RST_EXT:      return "reset pin";
+        case ESP_RST_DEEPSLEEP:return "wake";
+        default:               return "reset";
+    }
+}
+
 void setup() {
     Serial.begin(115200);
     pinMode(PIN_LED, OUTPUT);
@@ -52,6 +70,7 @@ void setup() {
     ui::bootStatus("Starting...");
 
     initNvs();
+    logInit();
     if (!crypto::init()) fatal("Crypto init failed");
     if (!settings::init()) fatal("Settings init failed");
     totp::init();
@@ -68,7 +87,7 @@ void setup() {
     portal::init();
 
     cli::init();
-    logEvent("Boot v" FW_VERSION);
+    logEvent("Boot v" FW_VERSION " (%s)", resetReason());
 #ifdef AUTHKEY_TEST_HOOKS
     logEvent("TEST BUILD - insecure");
 #endif
@@ -77,6 +96,7 @@ void setup() {
 
 void loop() {
     cli::loop();
+    logLoop();
     ble::loop();
     network::loop();
     portal::loop();
@@ -88,6 +108,8 @@ void loop() {
 
     hybrid::loop();
     unlock::loop();
+    web::loop();
+    approval::loop();
     ctap::loop();
     ui::loop();
 

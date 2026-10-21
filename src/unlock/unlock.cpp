@@ -11,12 +11,6 @@
 
 namespace unlock {
 
-struct PcEntry {
-    uint8_t id[UNLOCK_PC_ID_LEN];
-    uint8_t key[UNLOCK_KEY_LEN];
-    char    name[24];
-};
-
 static Preferences s_prefs;
 static PcEntry     s_pcs[UNLOCK_MAX_PCS];
 static bool        s_used[UNLOCK_MAX_PCS];
@@ -128,6 +122,22 @@ int count() {
     int n = 0;
     for (int i = 0; i < UNLOCK_MAX_PCS; i++) n += s_used[i];
     return n;
+}
+
+bool getEntry(int index, PcEntry* out) {
+    if (index < 0 || index >= UNLOCK_MAX_PCS || !s_used[index]) return false;
+    *out = s_pcs[index];
+    return true;
+}
+
+void replaceAll(const PcEntry* entries, int n) {
+    for (int i = 0; i < UNLOCK_MAX_PCS; i++) remove(i);
+    for (int i = 0; i < n && i < UNLOCK_MAX_PCS; i++) {
+        char key[16];
+        slotKey(i, key);
+        s_pcs[i] = entries[i];
+        s_used[i] = s_prefs.putBytes(key, &s_pcs[i], sizeof(PcEntry)) == sizeof(PcEntry);
+    }
 }
 
 bool name(int index, char* out, size_t cap) {

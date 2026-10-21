@@ -6,7 +6,13 @@
 //           LE Secure Connections with numeric comparison on the OLED.
 //   A3C87500-… AuthKey hybrid provisioning: tools/qr_bridge.py (PC) writes
 //           the "FIDO:/…" QR text here; status is notified back.
+//   0x1812  HID keyboard (optional, settings::keyboard()): types TOTP codes
+//           into the paired PC or phone. Bonding also lets Android treat the
+//           device as a trusted device (Extend Unlock).
 //   0x180A  Device Information.
+//
+// Up to CONFIG_BT_NIMBLE_MAX_CONNECTIONS centrals at once, and the device
+// keeps advertising while connected so the PC helper can tell it is nearby.
 // =============================================================================
 #pragma once
 
@@ -18,7 +24,8 @@ void init();
 void loop();                       // main-loop work: RX dispatch, keepalives
 
 bool connected();
-bool secured();                    // encrypted link
+int  linkCount();
+bool secured();                    // any encrypted link
 
 // Pairing (numeric comparison) — the UI shows `code` and asks the user.
 bool pairingPending(uint32_t* code);
@@ -34,5 +41,11 @@ void stopHybridAdvert();
 bool takeProvisioning(char* out, size_t cap);
 // Short status string notified to the BLE client ("connecting", ...).
 void setHybridStatus(const char* status);
+
+// Keyboard: types `text` (digits, letters, space, newline) into every
+// connected host that enabled the keyboard. Returns that number of hosts.
+bool keyboardEnabled();
+int  keyboardHosts();
+int  typeText(const char* text);
 
 }  // namespace ble

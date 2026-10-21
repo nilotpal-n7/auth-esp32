@@ -1,5 +1,7 @@
 #include "cli/cli.h"
 #include "config.h"
+#include "core/approval.h"
+#include "core/backup.h"
 #include "core/log.h"
 #include "core/settings.h"
 #include "crypto/crypto.h"
@@ -67,7 +69,9 @@ static void help() {
         "  auto on|off                 hands-free sign-in + registration (PIN once per unlocked session)\n"
         "  hybrid <FIDO:/...> | hybrid stop   phone-style login from a QR string\n"
         "  bt forget                   remove all Bluetooth bonds\n"
-        "  log                         recent events\n"
+        "  log | log clear             recent events (kept across reboots)\n"
+        "  kbd | kbd on|off | kbd type <n>   Bluetooth keyboard (types TOTP codes)\n"
+        "  backup | restore            use tools/authkey.py backup|restore <file>\n"
         "  ctap <hex>                  raw CTAP2 request (test harness)\n"
         "  reboot\n");
 }
@@ -80,9 +84,10 @@ static void status() {
              network::ip().c_str());
     consolef("  Clock:     %s (%s), UTC %ld\n", network::timeValid() ? clock : "not set",
              settings::timezone(), (long)network::now());
-    consolef("  Bluetooth: %s, %d bond(s), MAC %s\n",
-             ble::connected() ? "connected" : "advertising", ble::bondCount(),
-             WiFi.macAddress().c_str());
+    consolef("  Bluetooth: %d link(s), %d bond(s), keyboard %s (%d host(s)), MAC %s\n",
+             ble::linkCount(), ble::bondCount(), ble::keyboardEnabled() ? "on" : "off",
+             ble::keyboardHosts(), WiFi.macAddress().c_str());
+    if (network::connected()) consolef("  Web page:  http://%s/\n", network::ip().c_str());
     consolef("  TOTP:      %d account(s)\n", totp::count());
     consolef("  Passkeys:  %d/%d discoverable, sign count %lu\n", creds::residentCount(),
              creds::residentCapacity(), (unsigned long)settings::signCount());
@@ -252,6 +257,51 @@ static void cmdPasskeys(int argc, char** argv) {
     if (!n) consoleWrite("  (none)\n");
 }
 
+// Bluetooth keyboard: status, on/off (applies after a reboot), type a TOTP code.
+static void cmdKeyboard(int argc, char** argv) {
+    if (argc >= 2 && (!strcmp(argv[1], "on") || !strcmp(argv[1], "off"))) {
+        settings::setKeyboard(!strcmp(argv[1], "on"));
+        consolef("OK keyboard %s after `reboot`\n", settings::keyboard() ? "on" : "off");
+    } else if (argc >= 3 && !strcmp(argv[1], "type")) {
+        TotpAccount a;
+        time_t now = network::now();
+        if (!now) { consoleWrite("ERR clock not set\n"); return; }
+        if (!totp::get(atoi(argv[2]), &a)) { consoleWrite("ERR no such account\n"); return; }
+        char code[12];
+        snprintf(code, sizeof(code), "%0*lu", a.digits, (unsigned long)totp::generate(a, now));
+        crypto::wipe(&a, sizeof(a));
+        int hosts = ble::typeText(code);
+        crypto::wipe(code, sizeof(code));
+        consolef(hosts ? "OK typed into %d host(s)\n" : "ERR no keyboard host connected\n", hosts);
+    } else {
+        consolef("  keyboard %s, %d host(s) connected%s\n", ble::keyboardEnabled() ? "on" : "off",
+                 ble::keyboardHosts(),
+                 settings::keyboard() != ble::keyboardEnabled() ? " (changes after reboot)" : "");
+    }
+}
+
+// backup <key> | restore begin <key> <nonce> <len> | restore data <hex> | restore end
+// (driven by tools/authkey.py backup / restore, which derives the key from a passphrase)
+static void cmdBackup(int argc, char** argv) {
+    uint8_t key[32], nonce[12];
+    bool isRestore = !strcmp(argv[0], "restore");
+    if (!isRestore) {
+        if (argc >= 2 && hexDecode(argv[1], strlen(argv[1]), key, sizeof(key)) == 32) backup::exportStart(key);
+        else consoleWrite("ERR use tools/authkey.py backup <file>\n");
+    } else if (argc >= 5 && !strcmp(argv[1], "begin") &&
+               hexDecode(argv[2], strlen(argv[2]), key, sizeof(key)) == 32 &&
+               hexDecode(argv[3], strlen(argv[3]), nonce, sizeof(nonce)) == 12) {
+        backup::restoreBegin(key, nonce, (size_t)atol(argv[4]));
+    } else if (argc >= 3 && !strcmp(argv[1], "data")) {
+        backup::restoreData(argv[2]);
+    } else if (argc >= 2 && !strcmp(argv[1], "end")) {
+        backup::restoreEnd();
+    } else {
+        consoleWrite("ERR use tools/authkey.py restore <file>\n");
+    }
+    crypto::wipe(key, sizeof(key));
+}
+
 // CTAP over the console, for the PC test harness: "ctap <hex>" -> "CTAP <hex>"
 static void serialCtapReply(const uint8_t* data, size_t len) {
     static char hex[2 * FIDO_MAX_MSG + 8];
@@ -291,10 +341,12 @@ static void execute(char* line) {
     else if (!strcmp(cmd, "passkeys") || !strcmp(cmd, "passkey")) cmdPasskeys(argc, argv);
     else if (!strcmp(cmd, "unlock")) cmdUnlock(argc, argv);
     else if (!strcmp(cmd, "ctap")) cmdCtap(argc, argv);
+    else if (!strcmp(cmd, "backup") || !strcmp(cmd, "restore")) cmdBackup(argc, argv);
 #ifdef AUTHKEY_TEST_HOOKS
     // Test builds only: lets the PC harness stand in for the buttons. Never
     // enable in firmware you use, or software on the PC could approve logins.
     else if (!strcmp(cmd, "approve")) ctap::userApprove();
+    else if (!strcmp(cmd, "approve!")) approval::forceApprove();
     else if (!strcmp(cmd, "deny")) ctap::userDeny();
     else if (!strcmp(cmd, "uvpin") && argc >= 2) consoleWrite(ctap::userSubmitPin(argv[1]) ? "OK\n" : "ERR\n");
     else if (!strcmp(cmd, "setpin") && argc >= 2) consoleWrite(settings::pinSet(argv[1]) ? "OK\n" : "ERR\n");
@@ -329,10 +381,16 @@ static void execute(char* line) {
     } else if (!strcmp(cmd, "bt") && argc >= 2 && !strcmp(argv[1], "forget")) {
         ble::forgetBonds();
         consoleWrite("OK\n");
+    } else if (!strcmp(cmd, "log") && argc >= 2 && !strcmp(argv[1], "clear")) {
+        logClear();
+        consoleWrite("OK\n");
+    } else if (!strcmp(cmd, "kbd")) {
+        cmdKeyboard(argc, argv);
     } else if (!strcmp(cmd, "log")) {
         for (int i = 0; i < logCount(); i++) consolef("  %s\n", logLine(i));
     } else if (!strcmp(cmd, "reboot")) {
         consoleWrite("Rebooting...\n");
+        logFlush();
         delay(100);
         ESP.restart();
     } else {

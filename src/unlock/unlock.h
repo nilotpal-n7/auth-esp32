@@ -21,6 +21,13 @@
 
 namespace unlock {
 
+// One paired PC (also the record format in backups).
+struct PcEntry {
+    uint8_t id[UNLOCK_PC_ID_LEN];
+    uint8_t key[UNLOCK_KEY_LEN];
+    char    name[24];
+};
+
 // Called with ok=false (denied / unknown PC / timeout) or the 32-byte answer.
 typedef void (*ReplyFn)(bool ok, const uint8_t* mac, void* ctx);
 
@@ -44,6 +51,9 @@ void respond(const uint8_t pcId[UNLOCK_PC_ID_LEN], const uint8_t* challenge, siz
              const char* via, ReplyFn reply, void* ctx);
 
 int  count();
+bool getEntry(int index, PcEntry* out);       // index in [0, UNLOCK_MAX_PCS)
+// Replace every paired PC (backup restore).
+void replaceAll(const PcEntry* entries, int n);
 bool name(int index, char* out, size_t cap);
 bool remove(int index);
 

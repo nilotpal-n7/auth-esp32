@@ -1,10 +1,12 @@
 #include "transport/ble.h"
 #include "config.h"
 #include "core/log.h"
+#include "core/settings.h"
 #include "fido/ctap2.h"
 #include "unlock/unlock.h"
 
 #include <NimBLEDevice.h>
+#include <NimBLEHIDDevice.h>
 #include <freertos/FreeRTOS.h>
 
 namespace ble {
@@ -17,6 +19,7 @@ static const NimBLEUUID FIDO_CP_LENGTH_UUID("F1D0FFF3-DEAA-ECEE-B42F-C9BA7ED623B
 static const NimBLEUUID FIDO_REVISION_BITS_UUID("F1D0FFF4-DEAA-ECEE-B42F-C9BA7ED623BB");
 static const NimBLEUUID FIDO_REVISION_UUID((uint16_t)0x2A28);
 static const NimBLEUUID CABLE_UUID((uint16_t)0xFFF9);
+static const NimBLEUUID HID_SERVICE_UUID((uint16_t)0x1812);
 
 static const NimBLEUUID PROV_SERVICE_UUID("A3C87500-8ED3-4BDF-8A39-A01BEBEDE295");
 static const NimBLEUUID PROV_WRITE_UUID("A3C87501-8ED3-4BDF-8A39-A01BEBEDE295");
@@ -37,18 +40,34 @@ static const NimBLEUUID UNLOCK_UUID("A3C87503-8ED3-4BDF-8A39-A01BEBEDE295");
 #define KEEPALIVE_UP_NEEDED 0x02
 #define REVISION_FIDO2      0x20
 
+#define APPEARANCE_KEYBOARD 0x03C1
+
 static NimBLEServer*         s_server = nullptr;
 static NimBLECharacteristic* s_status = nullptr;
 static NimBLECharacteristic* s_cpLength = nullptr;
 static NimBLECharacteristic* s_provStatus = nullptr;
+static NimBLECharacteristic* s_kbdInput = nullptr;     // null when the keyboard is off
 
-static volatile bool s_connected = false;
-static volatile bool s_secured = false;
-static volatile uint16_t s_connHandle = BLE_HS_CONN_HANDLE_NONE;
-static volatile uint16_t s_mtu = 23;
+// Several centrals may be connected at once (e.g. the PC as security key and
+// keyboard, and a phone as keyboard). The FIDO transport talks to whichever
+// link last wrote to the control point.
+static volatile int      s_connCount = 0;
+static volatile uint16_t s_fidoConn = BLE_HS_CONN_HANDLE_NONE;
+static volatile uint16_t s_fidoMtu = 23;
+static volatile uint16_t s_kbdHosts[CONFIG_BT_NIMBLE_MAX_CONNECTIONS];   // subscribed links
+
+static void kbdHostSet(uint16_t handle, bool on) {
+    for (int i = 0; i < CONFIG_BT_NIMBLE_MAX_CONNECTIONS; i++) {
+        if (s_kbdHosts[i] == handle) s_kbdHosts[i] = BLE_HS_CONN_HANDLE_NONE;
+    }
+    for (int i = 0; on && i < CONFIG_BT_NIMBLE_MAX_CONNECTIONS; i++) {
+        if (s_kbdHosts[i] == BLE_HS_CONN_HANDLE_NONE) { s_kbdHosts[i] = handle; break; }
+    }
+}
 
 // Pairing confirmation, raised in the NimBLE task and answered from the UI.
 static volatile bool s_pairPending = false;
+static volatile bool s_newPairing = false;   // numeric comparison happened on this link
 static uint32_t      s_pairCode = 0;
 static NimBLEConnInfo* s_pairConn = nullptr;
 static uint8_t       s_pairConnStorage[sizeof(NimBLEConnInfo)] __attribute__((aligned(4)));
@@ -69,6 +88,7 @@ static bool     s_rxActive = false;
 static uint8_t  s_msg[FIDO_MAX_MSG];      // completed message waiting for loop()
 static size_t   s_msgLen = 0;
 static uint8_t  s_msgCmd = 0;
+static bool     s_msgSecure = false;
 static volatile bool s_msgReady = false;
 static volatile bool s_cancelRequested = false;
 static volatile uint8_t s_errorToSend = 0;
@@ -80,16 +100,18 @@ static uint32_t s_lastKeepalive = 0;
 
 // --- TX ---------------------------------------------------------------------
 
+static bool fidoLinkUp() { return s_fidoConn != BLE_HS_CONN_HANDLE_NONE; }
+
 static void notifyFragment(const uint8_t* data, size_t len) {
-    for (int attempt = 0; attempt < 50 && s_connected; attempt++) {
-        if (s_status->notify(data, len, s_connHandle)) return;
+    for (int attempt = 0; attempt < 50 && fidoLinkUp(); attempt++) {
+        if (s_status->notify(data, len, s_fidoConn)) return;
         delay(5);   // out of mbufs: wait for the controller to drain
     }
 }
 
 static void sendFrame(uint8_t cmd, const uint8_t* data, size_t len) {
-    if (!s_connected || !s_status) return;
-    size_t frag = s_mtu > 3 ? s_mtu - 3 : 20;
+    if (!fidoLinkUp() || !s_status) return;
+    size_t frag = s_fidoMtu > 3 ? s_fidoMtu - 3 : 20;
     if (frag > 512) frag = 512;
     uint8_t buf[512];
 
@@ -102,7 +124,7 @@ static void sendFrame(uint8_t cmd, const uint8_t* data, size_t len) {
 
     size_t off = first;
     uint8_t seq = 0;
-    while (off < len && s_connected) {
+    while (off < len && fidoLinkUp()) {
         size_t n = len - off < frag - 1 ? len - off : frag - 1;
         buf[0] = seq++ & 0x7F;
         memcpy(buf + 1, data + off, n);
@@ -119,6 +141,9 @@ static void ctapReply(const uint8_t* data, size_t len) {
 
 // --- Advertising -------------------------------------------------------------
 
+// The device advertises all the time, even while connected (up to the
+// connection limit): the PC helper watches these adverts to lock the PC when
+// the device goes out of range.
 static void applyAdvertising() {
     NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
     adv->stop();
@@ -129,7 +154,12 @@ static void applyAdvertising() {
         data.setServiceData(CABLE_UUID, s_eid, sizeof(s_eid));
         adv->setConnectableMode(BLE_GAP_CONN_MODE_NON);
     } else {
-        data.setCompleteServices16({FIDO_SERVICE_UUID});
+        if (s_kbdInput) {
+            data.setCompleteServices16({FIDO_SERVICE_UUID, HID_SERVICE_UUID});
+            data.setAppearance(APPEARANCE_KEYBOARD);
+        } else {
+            data.setCompleteServices16({FIDO_SERVICE_UUID});
+        }
         // FIDO service data: 0x80 = pairing mode (we accept pairing at any
         // time, gated by on-device numeric comparison).
         uint8_t fidoSvcData = 0x80;
@@ -141,22 +171,13 @@ static void applyAdvertising() {
     adv->setAdvertisementData(data);
     adv->setScanResponseData(scan);
     adv->enableScanResponse(true);
-    if (!s_connected) adv->start();
+    if (s_hybridAdvert || s_connCount < CONFIG_BT_NIMBLE_MAX_CONNECTIONS) adv->start();
 }
 
 void startHybridAdvert(const uint8_t eid[20]) {
     memcpy(s_eid, eid, 20);
     s_hybridAdvert = true;
-    // Only one BLE link is supported and advertising stops while connected,
-    // so a lingering client (e.g. a PC that left a GATT session open) would
-    // hide the EID from the desktop. Drop it unless it is mid-CTAP request;
-    // onDisconnect() then starts the EID advert.
-    if (s_connected && !(ctap::busy() && ctap::busyTransport() == CtapTransport::Ble)) {
-        logf("BLE", "dropping idle client so the hybrid advert can run");
-        s_server->disconnect(s_connHandle);
-        return;
-    }
-    applyAdvertising();
+    applyAdvertising();   // non-connectable, so it runs alongside open links
 }
 
 void stopHybridAdvert() {
@@ -169,45 +190,53 @@ void stopHybridAdvert() {
 
 class ServerCallbacks : public NimBLEServerCallbacks {
     void onConnect(NimBLEServer*, NimBLEConnInfo& info) override {
-        s_connected = true;
-        s_secured = info.isEncrypted();
-        s_connHandle = info.getConnHandle();
-        s_mtu = info.getMTU();
-        portENTER_CRITICAL(&s_mux);
-        s_rxActive = false;
-        portEXIT_CRITICAL(&s_mux);
-        logf("BLE", "connected: %s", info.getAddress().toString().c_str());
-    }
-
-    void onDisconnect(NimBLEServer*, NimBLEConnInfo& info, int reason) override {
-        s_connected = false;
-        s_secured = false;
-        s_connHandle = BLE_HS_CONN_HANDLE_NONE;
-        s_pairPending = false;
-        s_cancelRequested = true;       // abort any request from this link
-        logf("BLE", "disconnected (reason 0x%02X)", reason);
+        s_connCount = s_connCount + 1;
+        logf("BLE", "connected: %s (%d link(s))", info.getAddress().toString().c_str(), (int)s_connCount);
+        // Connecting stops advertising; keep it going for presence detection
+        // and further centrals.
         applyAdvertising();
     }
 
-    void onMTUChange(uint16_t mtu, NimBLEConnInfo&) override { s_mtu = mtu; }
+    void onDisconnect(NimBLEServer*, NimBLEConnInfo& info, int reason) override {
+        if (s_connCount > 0) s_connCount = s_connCount - 1;
+        kbdHostSet(info.getConnHandle(), false);
+        if (info.getConnHandle() == s_fidoConn) {
+            s_fidoConn = BLE_HS_CONN_HANDLE_NONE;
+            portENTER_CRITICAL(&s_mux);
+            s_rxActive = false;
+            portEXIT_CRITICAL(&s_mux);
+            s_cancelRequested = true;   // abort any request from this link
+        }
+        if (s_pairConn && s_pairConn->getConnHandle() == info.getConnHandle()) s_pairPending = false;
+        logf("BLE", "disconnected (reason 0x%02X, %d link(s) left)", reason, (int)s_connCount);
+        applyAdvertising();
+    }
+
+    void onMTUChange(uint16_t mtu, NimBLEConnInfo& info) override {
+        if (info.getConnHandle() == s_fidoConn) s_fidoMtu = mtu;
+    }
 
     void onConfirmPassKey(NimBLEConnInfo& info, uint32_t code) override {
         // Keep a copy; the UI answers later via pairingConfirm().
         s_pairConn = new (s_pairConnStorage) NimBLEConnInfo(info);
         s_pairCode = code;
         s_pairPending = true;
+        s_newPairing = true;
         logf("BLE", "pairing request, code %06lu", (unsigned long)code);
     }
 
     void onAuthenticationComplete(NimBLEConnInfo& info) override {
         s_pairPending = false;
-        s_secured = info.isEncrypted();
         if (!info.isEncrypted()) {
             logf("BLE", "pairing failed");
             NimBLEDevice::getServer()->disconnect(info.getConnHandle());
+        } else if (s_newPairing) {
+            logEvent("BLE paired %s", info.getAddress().toString().c_str());
         } else {
-            logEvent("BLE paired/secured");
+            // Bonded devices re-encrypt on every reconnect; not worth an event.
+            logf("BLE", "link secured: %s", info.getAddress().toString().c_str());
         }
+        s_newPairing = false;
     }
 };
 
@@ -219,6 +248,12 @@ class ControlPointCallbacks : public NimBLECharacteristicCallbacks {
         if (n == 0) return;
 
         portENTER_CRITICAL(&s_mux);
+        if (info.getConnHandle() != s_fidoConn) {
+            // Another central started talking FIDO: it owns the transport now.
+            s_fidoConn = info.getConnHandle();
+            s_fidoMtu = info.getMTU();
+            s_rxActive = false;
+        }
         uint8_t err = 0;
         if (d[0] & 0x80) {
             // Initialisation fragment: CMD | HLEN | LLEN | DATA
@@ -260,6 +295,7 @@ class ControlPointCallbacks : public NimBLECharacteristicCallbacks {
                 memcpy(s_msg, s_rx, s_rxLen);
                 s_msgLen = s_rxLen;
                 s_msgCmd = s_rxCmd;
+                s_msgSecure = info.isEncrypted();
                 s_msgReady = true;
             }
         }
@@ -306,7 +342,7 @@ static void bleUnlockReply(bool ok, const uint8_t* mac, void*) {
     out[0] = ok ? 0 : 1;
     if (ok && mac) memcpy(out + 1, mac, 32);
     s_unlockChar->setValue(out, sizeof(out));
-    if (s_connected) s_unlockChar->notify();
+    if (s_connCount) s_unlockChar->notify();
 }
 
 class ProvisionCallbacks : public NimBLECharacteristicCallbacks {
@@ -321,16 +357,38 @@ class ProvisionCallbacks : public NimBLECharacteristicCallbacks {
     }
 };
 
+class KeyboardCallbacks : public NimBLECharacteristicCallbacks {
+    void onSubscribe(NimBLECharacteristic*, NimBLEConnInfo& info, uint16_t subValue) override {
+        kbdHostSet(info.getConnHandle(), subValue & 1);
+        logf("BLE", "keyboard %s by %s", subValue & 1 ? "enabled" : "disabled",
+             info.getAddress().toString().c_str());
+    }
+};
+
 static ServerCallbacks       s_serverCb;
 static ControlPointCallbacks s_cpCb;
 static CpLengthCallbacks     s_cpLenCb;
 static RevisionBitsCallbacks s_revCb;
 static ProvisionCallbacks    s_provCb;
 static UnlockCallbacks       s_unlockCb;
+static KeyboardCallbacks     s_kbdCb;
+
+// Standard boot-compatible keyboard, report ID 1: modifiers, reserved, 6 keys
+// in; 5 LED bits out.
+static const uint8_t KEYBOARD_REPORT_MAP[] = {
+    0x05, 0x01, 0x09, 0x06, 0xA1, 0x01, 0x85, 0x01,
+    0x05, 0x07, 0x19, 0xE0, 0x29, 0xE7, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x08, 0x81, 0x02,
+    0x95, 0x01, 0x75, 0x08, 0x81, 0x01,
+    0x95, 0x05, 0x75, 0x01, 0x05, 0x08, 0x19, 0x01, 0x29, 0x05, 0x91, 0x02,
+    0x95, 0x01, 0x75, 0x03, 0x91, 0x01,
+    0x95, 0x06, 0x75, 0x08, 0x15, 0x00, 0x25, 0x65, 0x05, 0x07, 0x19, 0x00, 0x29, 0x65, 0x81, 0x00,
+    0xC0,
+};
 
 // --- Public API --------------------------------------------------------------
 
 void init() {
+    for (int i = 0; i < CONFIG_BT_NIMBLE_MAX_CONNECTIONS; i++) s_kbdHosts[i] = BLE_HS_CONN_HANDLE_NONE;
     NimBLEDevice::init(FW_NAME);
     NimBLEDevice::setPower(9);
     NimBLEDevice::setMTU(512);
@@ -370,15 +428,31 @@ void init() {
     s_unlockChar = prov->createCharacteristic(UNLOCK_UUID, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::NOTIFY);
     s_unlockChar->setCallbacks(&s_unlockCb);
 
-    NimBLEService* dis = s_server->createService((uint16_t)0x180A);
-    dis->createCharacteristic((uint16_t)0x2A29, NIMBLE_PROPERTY::READ)->setValue("AuthKey");
+    // Device Information (the HID helper creates the service when the
+    // keyboard is on; only one 0x180A may exist).
+    NimBLEService* dis;
+    if (settings::keyboard()) {
+        static NimBLEHIDDevice* hid = new NimBLEHIDDevice(s_server);
+        hid->setReportMap((uint8_t*)KEYBOARD_REPORT_MAP, sizeof(KEYBOARD_REPORT_MAP));
+        hid->setManufacturer("AuthKey");
+        hid->setPnp(0x02, 0x303A, 0x4001, 0x0200);   // USB-IF source, Espressif VID
+        hid->setHidInfo(0x00, 0x02);                 // not localised, normally connectable
+        hid->setBatteryLevel(100);
+        s_kbdInput = hid->getInputReport(1);
+        s_kbdInput->setCallbacks(&s_kbdCb);
+        hid->getOutputReport(1);                     // LEDs (ignored)
+        dis = hid->getDeviceInfoService();
+    } else {
+        dis = s_server->createService((uint16_t)0x180A);
+        dis->createCharacteristic((uint16_t)0x2A29, NIMBLE_PROPERTY::READ)->setValue("AuthKey");
+    }
     dis->createCharacteristic((uint16_t)0x2A24, NIMBLE_PROPERTY::READ)->setValue(FW_NAME);
     dis->createCharacteristic((uint16_t)0x2A26, NIMBLE_PROPERTY::READ)->setValue(FW_VERSION);
 
     s_server->start();
     applyAdvertising();
-    logf("BLE", "ready, address %s, %d bond(s)", NimBLEDevice::getAddress().toString().c_str(),
-         NimBLEDevice::getNumBonds());
+    logf("BLE", "ready, address %s, %d bond(s), keyboard %s", NimBLEDevice::getAddress().toString().c_str(),
+         NimBLEDevice::getNumBonds(), s_kbdInput ? "on" : "off");
 }
 
 void loop() {
@@ -406,14 +480,16 @@ void loop() {
         static uint8_t msg[FIDO_MAX_MSG];
         size_t len;
         uint8_t cmd;
+        bool secure;
         portENTER_CRITICAL(&s_mux);
         len = s_msgLen;
         cmd = s_msgCmd;
+        secure = s_msgSecure;
         memcpy(msg, s_msg, len);
         s_msgReady = false;
         portEXIT_CRITICAL(&s_mux);
 
-        if (!s_secured) {
+        if (!secure) {
             // Should not happen (the control point requires encryption).
             sendError(BLE_ERR_INVALID_CMD);
         } else if (cmd == BLE_CMD_PING) {
@@ -426,7 +502,7 @@ void loop() {
     }
 
     // Keepalive while waiting for the user (CTAP 2.0 §8.3.4.3)
-    if (ctap::busy() && ctap::busyTransport() == CtapTransport::Ble && s_connected &&
+    if (ctap::busy() && ctap::busyTransport() == CtapTransport::Ble && fidoLinkUp() &&
         millis() - s_lastKeepalive > 400) {
         s_lastKeepalive = millis();
         uint8_t status = KEEPALIVE_UP_NEEDED;
@@ -434,8 +510,16 @@ void loop() {
     }
 }
 
-bool connected() { return s_connected; }
-bool secured() { return s_secured; }
+bool connected() { return s_connCount > 0; }
+int  linkCount() { return s_connCount; }
+
+bool secured() {
+    if (!s_server) return false;
+    for (uint16_t h : s_server->getPeerDevices()) {
+        if (s_server->getPeerInfoByHandle(h).isEncrypted()) return true;
+    }
+    return false;
+}
 
 bool pairingPending(uint32_t* code) {
     if (s_pairPending && code) *code = s_pairCode;
@@ -464,7 +548,49 @@ bool takeProvisioning(char* out, size_t cap) {
 void setHybridStatus(const char* status) {
     if (!s_provStatus) return;
     s_provStatus->setValue(status);
-    if (s_connected) s_provStatus->notify();
+    if (s_connCount) s_provStatus->notify();
+}
+
+// --- Keyboard ------------------------------------------------------------------
+
+bool keyboardEnabled() { return s_kbdInput != nullptr; }
+
+int keyboardHosts() {
+    if (!s_kbdInput) return 0;
+    int n = 0;
+    for (int i = 0; i < CONFIG_BT_NIMBLE_MAX_CONNECTIONS; i++) n += s_kbdHosts[i] != BLE_HS_CONN_HANDLE_NONE;
+    return n;
+}
+
+static uint8_t keycode(char c, uint8_t* mod) {
+    *mod = 0;
+    if (c >= '1' && c <= '9') return 0x1E + (c - '1');
+    if (c == '0') return 0x27;
+    if (c >= 'a' && c <= 'z') return 0x04 + (c - 'a');
+    if (c >= 'A' && c <= 'Z') { *mod = 0x02; return 0x04 + (c - 'A'); }
+    if (c == '\n') return 0x28;
+    if (c == ' ') return 0x2C;
+    return 0;
+}
+
+int typeText(const char* text) {
+    int hosts = keyboardHosts();
+    if (!hosts) return 0;
+    uint8_t report[8];
+    for (const char* p = text; *p; p++) {
+        uint8_t mod;
+        uint8_t key = keycode(*p, &mod);
+        if (!key) continue;
+        memset(report, 0, sizeof(report));
+        report[0] = mod;
+        report[2] = key;
+        s_kbdInput->notify(report, sizeof(report));   // every subscribed host
+        delay(12);
+        memset(report, 0, sizeof(report));
+        s_kbdInput->notify(report, sizeof(report));
+        delay(12);
+    }
+    return hosts;
 }
 
 }  // namespace ble

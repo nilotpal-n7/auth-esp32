@@ -1,5 +1,9 @@
 // =============================================================================
 // core/log.h — serial logging plus a small ring buffer shown on the OLED
+//
+// The event log survives reboots: it lives in RTC memory (kept through resets
+// and crashes) and is copied to NVS a few seconds after each change (kept
+// through power loss).
 // =============================================================================
 #pragma once
 
@@ -17,6 +21,11 @@ void logEvent(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 
 int         logCount();
 const char* logLine(int index);   // 0 = oldest
+
+void logInit();      // after NVS init: restore the previous boot's events
+void logLoop();      // saves to NVS once changes have settled
+void logFlush();     // save now (before a reboot / firmware update)
+void logClear();
 
 // Raw console output (no tag), serialised with log output.
 void consolef(const char* fmt, ...) __attribute__((format(printf, 1, 2)));

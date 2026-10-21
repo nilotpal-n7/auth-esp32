@@ -1,12 +1,28 @@
 #include "core/log.h"
 #include <stdarg.h>
 #include <time.h>
+#include <Preferences.h>
+#include <esp_attr.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
-static char  s_lines[LOG_LINES][LOG_LINE_LEN];
-static int   s_head = 0;
-static int   s_count = 0;
+#define LOG_MAGIC      0x4C4F4731u   // "LOG1"
+#define LOG_SAVE_DELAY 10000         // ms after the last change
+#define LOG_SAVE_MAX   60000         // ms: save at least this often while busy
+
+struct LogRing {
+    uint32_t magic;
+    int16_t  head;
+    int16_t  count;
+    char     lines[LOG_LINES][LOG_LINE_LEN];
+};
+
+// RTC memory keeps its contents through resets and crashes (not power loss).
+RTC_NOINIT_ATTR static LogRing s_ring;
+static bool     s_ready = false;     // ring valid (logInit ran)
+static bool     s_dirty = false;
+static uint32_t s_changedMs = 0, s_dirtySinceMs = 0;
+static Preferences s_prefs;
 static SemaphoreHandle_t s_mutex = nullptr;
 
 static void lock() {
@@ -49,18 +65,73 @@ void logEvent(const char* fmt, ...) {
     snprintf(buf, sizeof(buf), "%s %s", ts, msg);
     lock();
     Serial.printf("[EVENT] %s\n", buf);
-    strlcpy(s_lines[s_head], buf, LOG_LINE_LEN);
-    s_head = (s_head + 1) % LOG_LINES;
-    if (s_count < LOG_LINES) s_count++;
+    if (s_ready) {
+        strlcpy(s_ring.lines[s_ring.head], buf, LOG_LINE_LEN);
+        s_ring.head = (s_ring.head + 1) % LOG_LINES;
+        if (s_ring.count < LOG_LINES) s_ring.count++;
+        s_changedMs = millis();
+        if (!s_dirty) s_dirtySinceMs = s_changedMs;
+        s_dirty = true;
+    }
     unlock();
 }
 
-int logCount() { return s_count; }
+int logCount() { return s_ready ? s_ring.count : 0; }
 
 const char* logLine(int index) {
-    if (index < 0 || index >= s_count) return "";
-    int oldest = (s_head - s_count + LOG_LINES) % LOG_LINES;
-    return s_lines[(oldest + index) % LOG_LINES];
+    if (!s_ready || index < 0 || index >= s_ring.count) return "";
+    int oldest = (s_ring.head - s_ring.count + LOG_LINES) % LOG_LINES;
+    return s_ring.lines[(oldest + index) % LOG_LINES];
+}
+
+static bool ringValid(const LogRing& r) {
+    return r.magic == LOG_MAGIC && r.head >= 0 && r.head < LOG_LINES && r.count >= 0 &&
+           r.count <= LOG_LINES;
+}
+
+void logInit() {
+    s_prefs.begin("log", false);
+    lock();
+    // RTC copy first: after a reset or crash it holds events newer than NVS.
+    if (!ringValid(s_ring)) {
+        if (s_prefs.getBytes("ring", &s_ring, sizeof(s_ring)) != sizeof(s_ring) || !ringValid(s_ring)) {
+            memset(&s_ring, 0, sizeof(s_ring));
+            s_ring.magic = LOG_MAGIC;
+        }
+    }
+    for (int i = 0; i < LOG_LINES; i++) s_ring.lines[i][LOG_LINE_LEN - 1] = '\0';
+    s_ready = true;
+    unlock();
+}
+
+static void saveLocked() {
+    s_prefs.putBytes("ring", &s_ring, sizeof(s_ring));
+    s_dirty = false;
+}
+
+void logLoop() {
+    if (!s_dirty) return;
+    uint32_t now = millis();
+    if (now - s_changedMs < LOG_SAVE_DELAY && now - s_dirtySinceMs < LOG_SAVE_MAX) return;
+    lock();
+    saveLocked();
+    unlock();
+}
+
+void logFlush() {
+    if (!s_ready) return;
+    lock();
+    if (s_dirty) saveLocked();
+    unlock();
+}
+
+void logClear() {
+    if (!s_ready) return;
+    lock();
+    memset(&s_ring, 0, sizeof(s_ring));
+    s_ring.magic = LOG_MAGIC;
+    saveLocked();
+    unlock();
 }
 
 void logHex(const char* tag, const char* label, const uint8_t* data, size_t len) {

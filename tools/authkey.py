@@ -7,10 +7,23 @@ CLI:      python tools/authkey.py [--port COMx] <console command ...>
           python tools/authkey.py status
           python tools/authkey.py totp uri "otpauth://totp/GitHub:me?secret=..."
           python tools/authkey.py            (interactive console)
+          python tools/authkey.py backup authkey-backup.json
+          python tools/authkey.py restore authkey-backup.json
+
+Backups hold the passkey master key, passkey records, TOTP accounts and
+paired PCs, encrypted with AES-256-GCM under a key derived from your
+passphrase (PBKDF2-SHA256, 600 000 rounds). Only that derived key goes to the
+device; the device encrypts / decrypts and asks you to confirm on its screen.
 """
 from __future__ import annotations
 
 import argparse
+import base64
+import getpass
+import hashlib
+import json
+import os
+import struct
 import sys
 import threading
 import time
@@ -161,6 +174,113 @@ class SerialCtapDevice:
                     raise TimeoutError("no CTAP response")
 
 
+BACKUP_AAD = b"AuthKey backup v1"
+BACKUP_FORMAT = "authkey-esp32-backup"
+KDF_ROUNDS = 600_000
+
+
+def _backup_summary(plain: bytes) -> dict:
+    """Counts what a decrypted backup holds (layout: src/core/backup.cpp)."""
+    if plain[:4] != b"AKB1":
+        raise SystemExit("Not an AuthKey backup.")
+    _ver, cred_size, totp_size, pc_size = struct.unpack_from("<HHHH", plain, 4)
+    pos = 12 + 32
+    (counter,) = struct.unpack_from("<I", plain, pos)
+    pos += 4
+    counts = {}
+    for name, size in (("passkeys", cred_size), ("totp", totp_size), ("pcs", pc_size)):
+        n = plain[pos]
+        counts[name] = n
+        pos += 1 + n * size
+    counts["sign_count"] = counter
+    return counts
+
+
+def _derive(passphrase: str, salt: bytes, rounds: int) -> bytes:
+    return hashlib.pbkdf2_hmac("sha256", passphrase.encode("utf-8"), salt, rounds)
+
+
+def backup_to(dev: AuthKeySerial, path: str):
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    if os.path.exists(path):
+        raise SystemExit(f"{path} already exists; pick another name.")
+    pw = getpass.getpass("New backup passphrase (10+ characters): ")
+    if len(pw) < 10:
+        raise SystemExit("Use at least 10 characters: the file is only as strong as this passphrase.")
+    if getpass.getpass("Repeat it: ") != pw:
+        raise SystemExit("The passphrases differ.")
+    salt = os.urandom(16)
+    key = _derive(pw, salt, KDF_ROUNDS)
+    print("Confirm on the AuthKey screen (and enter its PIN if it has one)...")
+    nonce, data = None, bytearray()
+    with dev.lock:
+        dev._drain()
+        dev.send("backup " + key.hex())
+        deadline = time.monotonic() + 60
+        while True:
+            if time.monotonic() > deadline:
+                raise SystemExit("Timed out waiting for the device.")
+            line = dev.readline(0.2)
+            if line is None:
+                continue
+            if line.startswith("BACKUP nonce "):
+                nonce = bytes.fromhex(line[13:].strip())
+            elif line.startswith("BACKUP data "):
+                data += bytes.fromhex(line[12:].strip())
+            elif line.startswith("OK backup"):
+                break
+            elif line.startswith("ERR"):
+                raise SystemExit(f"Device: {line}")
+    # Prove the file can be restored before calling it a backup.
+    plain = AESGCM(key).decrypt(nonce, bytes(data), BACKUP_AAD)
+    counts = _backup_summary(plain)
+    record = {
+        "format": BACKUP_FORMAT, "version": 1,
+        "created": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "kdf": "pbkdf2-sha256", "rounds": KDF_ROUNDS,
+        "salt": salt.hex(), "nonce": nonce.hex(),
+        "ciphertext": base64.b64encode(bytes(data)).decode(),
+        "contains": {k: counts[k] for k in ("passkeys", "totp", "pcs")},
+    }
+    with open(path, "x", encoding="utf-8") as f:
+        json.dump(record, f, indent=1)
+    print(f"Saved {path}: {counts['passkeys']} passkey(s), {counts['totp']} TOTP account(s), "
+          f"{counts['pcs']} paired PC(s). Keep it somewhere safe, with the passphrase stored separately.")
+
+
+def restore_from(dev: AuthKeySerial, path: str):
+    from cryptography.exceptions import InvalidTag
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    with open(path, encoding="utf-8") as f:
+        record = json.load(f)
+    if record.get("format") != BACKUP_FORMAT:
+        raise SystemExit("Not an AuthKey backup file.")
+    salt, nonce = bytes.fromhex(record["salt"]), bytes.fromhex(record["nonce"])
+    data = base64.b64decode(record["ciphertext"])
+    key = _derive(getpass.getpass("Backup passphrase: "), salt, int(record["rounds"]))
+    try:
+        counts = _backup_summary(AESGCM(key).decrypt(nonce, data, BACKUP_AAD))
+    except InvalidTag:
+        raise SystemExit("Wrong passphrase (or the file was changed).")
+    print(f"Backup from {record.get('created', '?')}: {counts['passkeys']} passkey(s), "
+          f"{counts['totp']} TOTP account(s), {counts['pcs']} paired PC(s).")
+    if input("This REPLACES all passkeys, TOTP accounts and paired PCs on the device. Type yes: ").strip() != "yes":
+        raise SystemExit("Cancelled.")
+
+    def step(line: str, until=("OK", "ERR"), timeout=5.0) -> str:
+        out = dev.command(line, timeout=timeout, until=until)
+        last = out[-1] if out else ""
+        if not last.startswith(until[0]):
+            raise SystemExit(f"Device: {last or 'no answer'}")
+        return last
+
+    step(f"restore begin {key.hex()} {nonce.hex()} {len(data)}")
+    for off in range(0, len(data), 128):
+        step("restore data " + data[off:off + 128].hex())
+    print("Confirm on the AuthKey screen (and enter its PIN if it has one)...")
+    print(step("restore end", until=("OK restored", "ERR"), timeout=60))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port")
@@ -168,6 +288,11 @@ def main():
     args = ap.parse_args()
     dev = AuthKeySerial(args.port)
     try:
+        if args.command[:1] in (["backup"], ["restore"]):
+            if len(args.command) != 2:
+                raise SystemExit(f"usage: authkey.py {args.command[0]} <file.json>")
+            (backup_to if args.command[0] == "backup" else restore_from)(dev, args.command[1])
+            return
         if args.command:
             parts = [f'"{a}"' if " " in a else a for a in args.command]
             for line in dev.command(" ".join(parts), timeout=3.0, until=("OK", "ERR", "CODE", "UTC", "CTAP")):

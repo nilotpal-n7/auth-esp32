@@ -1,6 +1,7 @@
 #include "ui/ui.h"
 #include "ui/buttons.h"
 #include "config.h"
+#include "core/approval.h"
 #include "core/log.h"
 #include "core/settings.h"
 #include "fido/credentials.h"
@@ -31,7 +32,7 @@ enum class Screen : uint8_t {
     ConfirmReset,
 };
 
-enum class PinPurpose : uint8_t { CtapUv, SetNew, SetConfirm, ChangeOld, RemoveOld };
+enum class PinPurpose : uint8_t { CtapUv, Approval, SetNew, SetConfirm, ChangeOld, RemoveOld };
 
 static Screen   s_screen = Screen::Home;
 static int      s_totpIndex = 0;
@@ -242,7 +243,8 @@ static void drawPinEntry() {
     g_lcd.setFont(u8g2_font_6x10_tr);
     const char* title = "Enter PIN";
     switch (s_pinPurpose) {
-        case PinPurpose::CtapUv:     title = "PIN to approve"; break;
+        case PinPurpose::CtapUv:
+        case PinPurpose::Approval:   title = "PIN to approve"; break;
         case PinPurpose::SetNew:     title = "New PIN"; break;
         case PinPurpose::SetConfirm: title = "Confirm new PIN"; break;
         case PinPurpose::ChangeOld:  title = "Current PIN"; break;
@@ -252,6 +254,9 @@ static void drawPinEntry() {
     if (s_pinPurpose == PinPurpose::CtapUv) {
         const CtapPrompt* p = ctap::prompt();
         if (p) { g_lcd.setFont(u8g2_font_5x7_tr); centered(20, p->rpId); }
+    } else if (s_pinPurpose == PinPurpose::Approval) {
+        const approval::Request* a = approval::pending();
+        if (a) { g_lcd.setFont(u8g2_font_5x7_tr); centered(20, a->title); }
     }
     // Entered digits as '*', current digit shown in a box.
     g_lcd.setFont(u8g2_font_9x15_tr);
@@ -267,7 +272,8 @@ static void drawPinEntry() {
         }
     }
     char tries[24] = "";
-    if (s_pinPurpose == PinPurpose::CtapUv || s_pinPurpose == PinPurpose::ChangeOld ||
+    if (s_pinPurpose == PinPurpose::CtapUv || s_pinPurpose == PinPurpose::Approval ||
+        s_pinPurpose == PinPurpose::ChangeOld ||
         s_pinPurpose == PinPurpose::RemoveOld) {
         snprintf(tries, sizeof(tries), "%d tries left", settings::pinRetries());
         g_lcd.setFont(u8g2_font_4x6_tr);
@@ -350,11 +356,19 @@ static void drawBluetooth() {
     char line[40];
     snprintf(line, sizeof(line), "Name %s", FW_NAME);
     g_lcd.drawStr(0, 20, line);
-    g_lcd.drawStr(0, 29, ble::connected() ? (ble::secured() ? "Connected (secure)" : "Connected")
-                                          : "Advertising");
+    if (ble::connected()) snprintf(line, sizeof(line), "%d link(s)%s", ble::linkCount(), ble::secured() ? ", secure" : "");
+    else strlcpy(line, "Advertising", sizeof(line));
+    g_lcd.drawStr(0, 29, line);
     snprintf(line, sizeof(line), "%d paired device(s)", ble::bondCount());
     g_lcd.drawStr(0, 38, line);
-    footer("hold OK: forget all  DOWN: back");
+    if (settings::keyboard() != ble::keyboardEnabled())
+        snprintf(line, sizeof(line), "Keyboard %s after reboot", settings::keyboard() ? "ON" : "off");
+    else if (ble::keyboardEnabled())
+        snprintf(line, sizeof(line), "Keyboard ON, %d host(s)", ble::keyboardHosts());
+    else
+        strlcpy(line, "Keyboard off", sizeof(line));
+    g_lcd.drawStr(0, 47, line);
+    footer("OK: keyboard on/off  hold OK: forget");
 }
 
 static void drawLog() {
@@ -378,7 +392,8 @@ static void drawInfo() {
     g_lcd.drawStr(0, 27, line);
     snprintf(line, sizeof(line), "Sign count: %lu", (unsigned long)settings::signCount());
     g_lcd.drawStr(0, 36, line);
-    snprintf(line, sizeof(line), "Free heap: %u", (unsigned)ESP.getFreeHeap());
+    if (network::connected()) snprintf(line, sizeof(line), "Web: http://%s/", network::ip().c_str());
+    else snprintf(line, sizeof(line), "Free heap: %u", (unsigned)ESP.getFreeHeap());
     g_lcd.drawStr(0, 45, line);
     snprintf(line, sizeof(line), "Up %lus", (unsigned long)(millis() / 1000));
     g_lcd.drawStr(0, 54, line);
@@ -471,6 +486,23 @@ static void drawUnlockPrompt(const unlock::Prompt* p) {
     footer(pairing ? "OK: pair   DOWN: cancel" : "OK: unlock   DOWN: deny");
 }
 
+static void drawApproval(const approval::Request* a) {
+    g_lcd.setFont(u8g2_font_6x10_tr);
+    g_lcd.drawBox(0, 0, W, 11);
+    g_lcd.setDrawColor(0);
+    centered(9, a->title);
+    g_lcd.setDrawColor(1);
+    g_lcd.setFont(u8g2_font_5x7_tr);
+    centered(26, a->detail);
+    centered(37, a->hint);
+    uint32_t elapsed = millis() - a->startedMs;
+    uint32_t left = elapsed < FIDO_USER_TIMEOUT_MS ? (FIDO_USER_TIMEOUT_MS - elapsed) / 1000 : 0;
+    char t[16];
+    snprintf(t, sizeof(t), "%lus", (unsigned long)left);
+    g_lcd.drawStr(W - g_lcd.getStrWidth(t), 47, t);
+    footer(a->needPin ? "OK: enter PIN   DOWN: deny" : "OK: allow   DOWN: deny");
+}
+
 static void draw() {
     g_lcd.clearBuffer();
     g_lcd.setDrawColor(1);
@@ -481,6 +513,9 @@ static void draw() {
         drawPairing(code);
     } else if (const unlock::Prompt* up = unlock::prompt()) {
         drawUnlockPrompt(up);
+    } else if (approval::pending() &&
+               !(s_screen == Screen::PinEntry && s_pinPurpose == PinPurpose::Approval)) {
+        drawApproval(approval::pending());
     } else if (p && !(s_screen == Screen::PinEntry && s_pinPurpose == PinPurpose::CtapUv)) {
         drawPrompt(p);
     } else if (s_screen == Screen::PinEntry) {
@@ -557,6 +592,14 @@ static void submitPin() {
                 else { s_pinLen = 0; s_pinDigit = 0; }
             }
             break;
+        case PinPurpose::Approval:
+            if (approval::submitPin(s_pin)) endPin(Screen::Home);
+            else {
+                toast(settings::pinRetries() ? "Wrong PIN" : "PIN blocked");
+                if (!approval::pending()) endPin(Screen::Home);
+                else { s_pinLen = 0; s_pinDigit = 0; }
+            }
+            break;
         case PinPurpose::SetNew:
             if (s_pinLen < FIDO_PIN_MIN_LEN) { toast("Min 4 digits"); return; }
             strlcpy(s_pinFirst, s_pin, sizeof(s_pinFirst));
@@ -589,6 +632,10 @@ static void submitPin() {
     }
 }
 
+static bool isPromptPin() {
+    return s_pinPurpose == PinPurpose::CtapUv || s_pinPurpose == PinPurpose::Approval;
+}
+
 static void handlePinKey(Key k) {
     switch (k) {
         case Key::Up:   s_pinDigit = (s_pinDigit + 1) % 10; break;
@@ -605,7 +652,8 @@ static void handlePinKey(Key k) {
                 s_pinLen--;                          // backspace
             } else {
                 if (s_pinPurpose == PinPurpose::CtapUv) ctap::userDeny();
-                endPin(s_pinPurpose == PinPurpose::CtapUv ? Screen::Home : s_pinReturn);
+                if (s_pinPurpose == PinPurpose::Approval) approval::deny();
+                endPin(isPromptPin() ? Screen::Home : s_pinReturn);
             }
             break;
         case Key::OkLong:
@@ -617,13 +665,29 @@ static void handlePinKey(Key k) {
             break;
         case Key::DownLong:
             if (s_pinPurpose == PinPurpose::CtapUv) ctap::userDeny();
-            endPin(s_pinPurpose == PinPurpose::CtapUv ? Screen::Home : s_pinReturn);
+            if (s_pinPurpose == PinPurpose::Approval) approval::deny();
+            endPin(isPromptPin() ? Screen::Home : s_pinReturn);
             break;
         default: break;
     }
 }
 
 // --- Input handling ----------------------------------------------------------
+
+// OK on the code screen: type the code into the paired PC / phone.
+static void typeCurrentCode() {
+    if (!ble::keyboardEnabled()) { toast("Keyboard is off"); return; }
+    time_t now = network::now();
+    if (!now) { toast("Clock not set"); return; }
+    TotpAccount a;
+    if (!totp::get(s_totpIndex, &a)) return;
+    char code[12];
+    snprintf(code, sizeof(code), "%0*lu", a.digits, (unsigned long)totp::generate(a, now));
+    memset(&a, 0, sizeof(a));
+    int hosts = ble::typeText(code);
+    memset(code, 0, sizeof(code));
+    toast(hosts ? "Code typed" : "No keyboard host");
+}
 
 static void openMenuItem(int i) {
     switch (i) {
@@ -659,6 +723,20 @@ static void handleKey(Key k) {
         else if (k == Key::Down || k == Key::Left) unlock::userDeny();
         return;
     }
+    // 1c. Backup / restore / web-session confirmation
+    if (approval::pending()) {
+        if (s_screen == Screen::PinEntry && s_pinPurpose == PinPurpose::Approval) {
+            handlePinKey(k);
+            return;
+        }
+        if (k == Key::Down || k == Key::Left) approval::deny();
+        else if (k == Key::Ok) {
+            if (approval::pending()->needPin) beginPin(PinPurpose::Approval, s_screen);
+            else approval::approve();
+        }
+        return;
+    }
+    if (s_screen == Screen::PinEntry && s_pinPurpose == PinPurpose::Approval) endPin(Screen::Home);
     // 2. FIDO prompt
     const CtapPrompt* p = ctap::prompt();
     if (p) {
@@ -692,6 +770,7 @@ static void handleKey(Key k) {
             if (k == Key::Up && n) s_totpIndex = (s_totpIndex + n - 1) % n;
             else if (k == Key::Down && n) s_totpIndex = (s_totpIndex + 1) % n;
             else if (k == Key::OkLong || k == Key::Right) { s_menuIndex = 0; s_screen = Screen::Menu; }
+            else if (k == Key::Ok && n) typeCurrentCode();
             break;
         }
         case Screen::Menu:
@@ -756,7 +835,16 @@ static void handleKey(Key k) {
             break;
         case Screen::Bluetooth:
             if (k == Key::OkLong) { ble::forgetBonds(); logEvent("BLE bonds cleared"); toast("Forgotten"); }
-            else if (k == Key::Down || k == Key::Left || k == Key::Ok) s_screen = Screen::Menu;
+            else if (k == Key::Ok) {
+                settings::setKeyboard(!settings::keyboard());
+                logEvent("BT keyboard %s", settings::keyboard() ? "ON" : "off");
+                toast("Rebooting...");
+                draw();
+                logFlush();
+                delay(800);
+                ESP.restart();
+            }
+            else if (k == Key::Down || k == Key::Left) s_screen = Screen::Menu;
             break;
         case Screen::Log:
             if (k == Key::Up) s_listIndex++;
@@ -812,7 +900,7 @@ void otaProgress(unsigned done, unsigned total) {
 
 void loop() {
     Key k = buttons::poll();
-    bool attention = ctap::prompt() || ble::pairingPending(nullptr) || unlock::prompt();
+    bool attention = ctap::prompt() || ble::pairingPending(nullptr) || unlock::prompt() || approval::pending();
 
     if (k != Key::None) {
         s_lastInput = millis();

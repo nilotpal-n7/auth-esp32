@@ -8,6 +8,10 @@ to the AuthKey-ESP32.
 - Authenticator-app QR (otpauth://, shown when you turn on 2FA on a site):
   the account is added to the device's TOTP codes (USB only). Each QR is
   added once.
+- Proximity lock: locks the PC when the AuthKey goes out of Bluetooth range
+  (tools/presence.py; --no-lock to turn off).
+- Campus notifications: a Windows notification when the IITG internet drops
+  or comes back (--no-notify to turn off).
 
     .venv/Scripts/python tools/qr_bridge.py [--port COMx] [--ble] [--log FILE]
 
@@ -220,6 +224,8 @@ def main():
     ap.add_argument("--ble", action="store_true", help="always use Bluetooth for passkeys, even if USB is connected")
     ap.add_argument("--interval", type=float, default=0.5)
     ap.add_argument("--log", help="write output to this file instead of the console")
+    ap.add_argument("--no-lock", action="store_true", help="don't lock the PC when the AuthKey is away")
+    ap.add_argument("--no-notify", action="store_true", help="no campus-internet notifications")
     args = ap.parse_args()
     redirect_output(args.log)
 
@@ -227,6 +233,9 @@ def main():
     if not lock:
         log("Another qr_bridge is already running; exiting.")
         return
+
+    import presence
+    presence.start(log, lock=not args.no_lock, campus=not args.no_notify)
 
     link = None if args.ble else SerialLink(args.port)
     detector = cv2.QRCodeDetector()

@@ -34,6 +34,7 @@ bool get(int index, TotpAccount* out);
 // Returns new index or -1 (full / invalid).
 int  add(const TotpAccount& account);
 bool remove(int index);
+void clear();              // delete every account (backup restore)
 
 // Parse "otpauth://totp/Label?secret=...&digits=..&period=..&algorithm=.."
 // or "<name> <base32>" into an account. Returns false on invalid input.

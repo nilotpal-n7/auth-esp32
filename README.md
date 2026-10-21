@@ -14,6 +14,15 @@ a few buttons:
   - **USB security key** on Windows, through the PC service and usbip-win2.
 - Every registration and sign-in is approved **on the device** with the OK
   button. An optional on-device PIN adds user verification.
+- **Bluetooth keyboard**: press OK on a code to type it into the paired PC or
+  phone.
+- **Walk-away lock** for Windows (and Android, as a trusted device), plus
+  automatic Windows sign-in when you come back.
+- **Web page** on your network for the event log, campus login, passkeys and
+  authenticator accounts.
+- **Encrypted backups** of everything that can't be recreated.
+- **Campus WiFi auto-login** (IIT Guwahati) for the whole network behind
+  your router.
 
 ## Hardware
 
@@ -64,13 +73,14 @@ host come from `.env`). Leave `OTA_PASSWORD` empty to keep OTA off.
 
 | Where | Action |
 | --- | --- |
-| Home (TOTP) | UP/DOWN switch account · hold OK → menu |
+| Home (TOTP) | UP/DOWN switch account · **OK types the code** (Bluetooth keyboard) · hold OK → menu |
 | Menus | UP/DOWN move · OK select · hold OK (or LEFT) back |
-| Passkey / pairing prompt | **OK approve** · DOWN deny |
+| Passkey / pairing / backup / web prompt | **OK approve** · DOWN deny |
 | PIN entry | UP/DOWN change digit · OK next digit · hold OK submit · hold UP delete |
 
 The menu has: Passkeys (list/delete), Auto-approve, Device PIN, WiFi,
-Bluetooth (forget pairings), Event log, Device info, Reset passkeys.
+Campus net, Bluetooth (keyboard on/off, forget pairings), Event log, Device
+info (shows the web page address), Reset passkeys.
 
 ### TOTP accounts
 
@@ -111,6 +121,21 @@ on the OLED to finish the site's setup.
 4. The device connects through the FIDO tunnel and shows **REGISTER** or
    **SIGN IN** with the site name. Press **OK**.
 
+### Type codes with the Bluetooth keyboard
+
+The device is also a Bluetooth keyboard. Pair **AuthKey-ESP32** with your PC
+or phone (the OLED shows a 6-digit code: press OK if it matches), click into
+the code field, then press **OK** on the code screen: the device types the
+current code. It types into every paired host that is connected. Turn the
+keyboard off (or on) in **Menu → Bluetooth → OK**; the device restarts.
+
+If the PC was paired before the keyboard existed, remove AuthKey-ESP32 in
+Windows Bluetooth settings and pair it again, so Windows picks up the keyboard.
+
+On Android a connected hardware keyboard hides the on-screen keyboard. To
+keep it, turn on Settings → System → Keyboard → Physical keyboard →
+*Show on-screen keyboard*.
+
 ### Passkeys over Bluetooth (security-key mode)
 
 Pair "AuthKey-ESP32" in your OS Bluetooth settings. The OLED shows a 6-digit
@@ -127,6 +152,28 @@ USB HID key over USB/IP on 127.0.0.1 and forwards each CTAP request to the
 device over its serial port. The key attaches when the board is plugged in
 and detaches when it's unplugged. To turn it off, create
 `C:\ProgramData\AuthKey\no-virtual-key` and restart the service.
+
+### Firefox
+
+Firefox on Windows uses the same Windows passkey dialog as Chrome and Edge,
+so everything above works the same: **Security key** (Bluetooth or USB) and
+**"Use a phone or tablet"** (the QR helper spots the QR in any browser).
+
+### Android
+
+- **Lock and unlock:** pair AuthKey-ESP32 with the phone (it pairs as a
+  keyboard), then add it under Settings → Security & privacy → More security
+  settings → **Extend Unlock → Trusted devices**. The phone stays unlocked
+  while the AuthKey is near and connected. Walk away and it locks normally;
+  your PIN or fingerprint always works, and the trusted device only takes
+  over again once it is connected.
+- **Codes:** the keyboard types TOTP codes into apps too (above).
+- **Passkeys:** Android only uses NFC or USB security keys, and an ESP32 has
+  neither, so the AuthKey can't be picked as a "security key" on Android. An
+  experimental route: when Android shows a passkey QR ("use another device"),
+  screenshot it, copy its text with Google Lens (it starts with `FIDO:/`) and
+  paste it into the web page's **Phone sign-in** box. The AuthKey then signs
+  in like a phone. Android may close its QR dialog when you switch apps.
 
 ### Device PIN (user verification)
 
@@ -154,8 +201,8 @@ answers a fresh random challenge (HMAC-SHA256 with a per-PC key).
 
 - With auto-approve **on**, the device answers by itself. With it **off**, the
   OLED asks "UNLOCK PC?" and you press OK.
-- USB means "unlocked whenever plugged in". Bluetooth gives walk-away locking
-  (about 10 m). WiFi works whenever the device is on the same network. Turn
+- USB means "unlocked whenever plugged in". WiFi works whenever the device is
+  on the same network. Bluetooth works within about 10 m. Turn
   transports on or off with
   `"C:\Program Files\AuthKey\AuthKeyUnlock.exe" set usb|bluetooth|wifi on|off`.
 - Your normal PIN, face and password sign-in stay available. If Windows ever
@@ -165,6 +212,26 @@ answers a fresh random challenge (HMAC-SHA256 with a per-PC key).
   For a per-packet USB key trace, create `C:\ProgramData\AuthKey\vk-trace`.
 - Emergency off-switch: create the file `C:\ProgramData\AuthKey\disabled`.
   Remove everything with `pc\uninstall.ps1 -Purge`.
+
+### Lock the PC when you walk away
+
+The PC helper (the one that reads QR codes, `tools/qr_bridge.py`) watches
+the AuthKey's Bluetooth signal; the device advertises all the time, even while
+connected. When the AuthKey has been out of range for 20 s, the PC locks,
+as if you pressed Win+L. Come back and the AuthKey signs you in again
+(*Windows sign-in* above).
+
+- It only locks after it has seen the AuthKey nearby, and each lock disarms
+  it until the AuthKey is nearby again. So if you sign in with your Windows
+  PIN while the AuthKey is away, the PC stays unlocked (no lock loop) until
+  the AuthKey comes back.
+- Settings in `%LOCALAPPDATA%\AuthKey\helper.json`: `auto_lock`,
+  `away_seconds` (20), `min_rssi` (-85 dBm: a weaker signal counts as away;
+  raise it towards -70 to lock sooner). Restart the helper after editing
+  (`tools\autostart.ps1`). `python tools/presence.py watch` shows the live
+  signal without locking. `qr_bridge.py --no-lock` turns it off.
+- Flashing the device over USB takes it off the air for about a minute, so
+  the PC locks; sign in with your PIN (the lock won't loop).
 
 ### Campus WiFi auto-login (IITG)
 
@@ -194,10 +261,56 @@ again) and the **Auto-login ON/off** switch. The home screen shows
 event log with its time (`14:39 IITG session lost`), so you can see when and
 how often the campus ends sessions.
 
+The PC helper shows a Windows notification when the campus internet drops,
+comes back, or the login is stuck (session limit, rejected password). If
+Windows notifications are turned off (Settings → System → Notifications), it
+shows a small pop-up that closes itself instead. `qr_bridge.py --no-notify`
+turns this off.
+
+### Web page
+
+`http://authkey-esp32.local/` (or the IP shown in **Menu → Device info**)
+from any browser on the same network, phones included:
+
+- Anyone on the network sees only the device status and campus-login state.
+- **Allow this browser** shows "ALLOW WEB ACCESS?" on the OLED; press OK.
+  For 12 hours that browser gets the event log, campus Login/Logout and the
+  auto-login switch, the passkey and authenticator lists (delete, add an
+  `otpauth://` link) and the phone sign-in box. Sessions live in RAM, are
+  tied to the browser's IP and end on reboot or with **Lock this browser**.
+- Codes and secrets are never shown on the page.
+
+### Backup and restore
+
+Every passkey is derived from a master key inside the device: if the board
+dies, they're gone. Make a backup once, and again after adding passkeys or
+accounts:
+
+```bash
+.venv/Scripts/python tools/authkey.py backup authkey-backup.json
+.venv/Scripts/python tools/authkey.py restore authkey-backup.json   # onto a new or reset board
+```
+
+The backup holds the master key, passkey records, signature counter, TOTP
+accounts and paired PCs. It is encrypted with AES-256-GCM under a key made
+from your passphrase (PBKDF2-SHA256, 600 000 rounds). Only that derived key
+goes over USB, never the passphrase. Both directions must be confirmed on the
+OLED, with the device PIN if one is set. Restoring replaces everything,
+moves the signature counter forward (so sites never see it go back) and
+restarts the device. Keep the file and the passphrase in separate places.
+
+### Event log
+
+**Menu → Event log**, `log` on the serial console, or the web page. Each line
+is stamped with the time (or `+M:SS` since boot before the clock is set). The
+log survives reboots, crashes and power cuts. Each boot logs why the last one
+ended (`Boot v2.0.0 (crash)`, `(power on)`, `(restart)`). `log clear` empties it.
+
 ## Serial console
 
 `help` lists everything. Highlights: `status`, `totp …`, `wifi add <ssid> <pass>`,
-`passkeys`, `tz <POSIX TZ>`, `auto on|off`, `hybrid <FIDO:/…>`, `portal …`, `log`.
+`passkeys`, `tz <POSIX TZ>`, `auto on|off`, `hybrid <FIDO:/…>`, `portal …`,
+`log`, `log clear`, `kbd`, `kbd on|off`, `kbd type <n>`.
 
 ## Security notes
 
@@ -220,7 +333,12 @@ how often the campus ends sessions.
 - OTA is **off** unless `OTA_PASSWORD` is set in `.env`. Anyone who can flash
   firmware can read your keys, so use a long random password and trusted WiFi.
 - The `test` build (`pio run -e test`) adds console commands that let software
-  on the PC approve requests. Use it only for running the tests.
+  on the PC approve requests (`approve!` even skips the PIN for backup
+  prompts). Use it only for running the tests.
+- The web page is plain HTTP on your local network: an approved browser
+  session could be sniffed by someone else on the same WiFi. It never shows
+  codes or secrets, but it can delete passkeys and log the campus session
+  out. Lock the browser session when you're done on a shared network.
 
 ## Tests
 
@@ -241,16 +359,16 @@ Flash the normal build afterwards: `pio run -t upload`.
 src/
   main.cpp               setup + cooperative main loop
   config.h               pins and constants (secrets: .env via scripts/env_secrets.py)
-  core/                  logging, persistent settings, PIN
+  core/                  event log (persistent), settings, PIN, on-device approvals, backup
   crypto/                mbedTLS wrappers (P-256, AES-GCM, HKDF, ...)
   util/                  CBOR reader/writer, hex/base32, FIDO QR digits
   fido/                  CTAP 2.0 engine, credential derivation & storage
-  transport/ble.*        NimBLE: FIDO BLE service, pairing, hybrid adverts
+  transport/ble.*        NimBLE: FIDO BLE service, keyboard, pairing, hybrid adverts
   transport/hybrid.*     caBLE v2: tunnel, Noise KNpsk0, encrypted CTAP
-  net/                   WiFi/NTP/OTA, campus portal login, WebSocket client, root CAs
+  net/                   WiFi/NTP/OTA, campus portal login, web page, WebSocket client, root CAs
   totp/                  TOTP storage and generation
   ui/                    OLED screens, buttons
   cli/                   USB serial console
-tools/                   PC helpers and tests (Python)
+tools/                   PC helpers (QR, walk-away lock, notifications, backup) and tests
 partitions.csv           2 × 1.875 MB OTA slots + 128 KB NVS
 ```
