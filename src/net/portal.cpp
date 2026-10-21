@@ -317,7 +317,7 @@ static void doLogout() {
     s_state = St::Offline;
     if (!s_magic[0]) {
         setResult("paused (no session to end)");
-        event("Portal: paused");
+        event("IITG paused");
         return;
     }
     char path[64];
@@ -326,7 +326,7 @@ static void doLogout() {
     s_magic[0] = '\0';
     logf("PORTAL", "logout HTTP %d", st);
     setResult("logged out");
-    event("Portal: logged out");
+    event("IITG logged out");
 }
 
 static uint32_t netBackoffMs() {
@@ -347,25 +347,25 @@ static void doLogin(uint32_t now, bool manual) {
             s_nextKeep = now + (uint32_t)PORTAL_KEEPALIVE_SECS * 1000UL;
             s_next = now + (uint32_t)PORTAL_PROBE_SECS * 1000UL;
             if (r == Res::Ok) setResult("logged in");
-            event("Portal: logged in (%s)", SECRET_IITG_USER);
+            event("IITG login OK");
             break;
         case Res::Limit:   // wait for a slot to free up, then log in again by itself
             s_state = St::Limit;
             s_next = now + (uint32_t)PORTAL_LIMIT_RETRY_SECS * 1000UL;
-            event("Portal: session limit, retrying");
+            event("IITG limit, retrying");
             break;
         case Res::Rejected:
             s_rejects++;
             s_state = St::Failed;
             s_next = now + (s_rejects >= PORTAL_MAX_FAILS ? (uint32_t)PORTAL_CRED_BACKOFF_SECS
                                                           : (uint32_t)PORTAL_RETRY_SECS) * 1000UL;
-            event("Portal: login rejected");
+            event("IITG login rejected");
             break;
         default:
             s_netFails++;
             s_state = St::Failed;
             s_next = now + netBackoffMs();
-            event("Portal: %s", s_result);
+            event("IITG %s", s_result);
             break;
     }
     if (manual && s_state != St::Online) logf("PORTAL", "manual login: %s", s_result);
@@ -377,7 +377,7 @@ bool haveCredentials() { return SECRET_IITG_USER[0] && SECRET_IITG_PASS[0]; }
 bool enabled() { return settings::portalAuto(); }
 void setEnabled(bool on) {
     settings::setPortalAuto(on);
-    logEvent("Portal auto-login %s", on ? "ON" : "off");
+    logEvent("IITG auto-login %s", on ? "ON" : "off");
     s_next = 0;
 }
 bool paused() { return s_paused; }
@@ -431,7 +431,7 @@ void loop() {
                 if (keepalive()) {
                     s_nextKeep = now + (uint32_t)PORTAL_KEEPALIVE_SECS * 1000UL;
                 } else if (autoOn) {
-                    event("Portal: session ended, logging in");
+                    event("IITG ended, relogin");
                     s_next = now + 2000;   // log straight back in
                     return;
                 }
@@ -444,7 +444,7 @@ void loop() {
                 s_logins++;
                 s_nextKeep = now + (uint32_t)PORTAL_KEEPALIVE_SECS * 1000UL;
                 setResult("logged in");
-                event("Portal: logged in (%s)", SECRET_IITG_USER);
+                event("IITG login OK");
             } else {
                 s_nextAdopt = now + (uint32_t)PORTAL_CRED_BACKOFF_SECS * 1000UL;   // don't fight it
                 setResult("online (not ours)");
@@ -455,7 +455,7 @@ void loop() {
     }
 
     // Not logged in (or the probe got no answer).
-    if (s_state == St::Online) event("Portal: session lost");
+    if (s_state == St::Online) event("IITG session lost");
     s_magic[0] = '\0';
     if (!autoOn) {
         s_state = St::Offline;

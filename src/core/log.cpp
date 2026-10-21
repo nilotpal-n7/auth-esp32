@@ -1,5 +1,6 @@
 #include "core/log.h"
 #include <stdarg.h>
+#include <time.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
@@ -25,15 +26,30 @@ void logf(const char* tag, const char* fmt, ...) {
     unlock();
 }
 
+// "14:39" once the clock is set (TZ applies), else uptime "+3:05" (min:sec).
+static void stamp(char* out, size_t cap) {
+    time_t t = time(nullptr);
+    if (t > 1700000000) {
+        struct tm lt;
+        localtime_r(&t, &lt);
+        strftime(out, cap, "%H:%M", &lt);
+    } else {
+        uint32_t s = millis() / 1000;
+        snprintf(out, cap, "+%lu:%02lu", (unsigned long)(s / 60), (unsigned long)(s % 60));
+    }
+}
+
 void logEvent(const char* fmt, ...) {
-    char buf[LOG_LINE_LEN];
+    char msg[LOG_LINE_LEN], ts[12], buf[LOG_LINE_LEN + 12];
     va_list ap;
     va_start(ap, fmt);
-    vsnprintf(buf, sizeof(buf), fmt, ap);
+    vsnprintf(msg, sizeof(msg), fmt, ap);
     va_end(ap);
+    stamp(ts, sizeof(ts));
+    snprintf(buf, sizeof(buf), "%s %s", ts, msg);
     lock();
     Serial.printf("[EVENT] %s\n", buf);
-    memcpy(s_lines[s_head], buf, LOG_LINE_LEN);
+    strlcpy(s_lines[s_head], buf, LOG_LINE_LEN);
     s_head = (s_head + 1) % LOG_LINES;
     if (s_count < LOG_LINES) s_count++;
     unlock();

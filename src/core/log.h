@@ -5,13 +5,14 @@
 
 #include <Arduino.h>
 
-#define LOG_LINES       12
-#define LOG_LINE_LEN    40
+#define LOG_LINES       24
+#define LOG_LINE_LEN    44
 
-// Print "[tag] message" to serial. Also kept in the on-device log if `keep`.
+// Print "[tag] message" to serial.
 void logf(const char* tag, const char* fmt, ...) __attribute__((format(printf, 2, 3)));
 
-// Same as logf, and also adds a short line to the on-device event log.
+// Adds a line to the on-device event log (and serial), stamped with the
+// local time "HH:MM", or the uptime "+M:SS" until the clock is set.
 void logEvent(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 
 int         logCount();

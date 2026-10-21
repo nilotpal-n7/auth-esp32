@@ -85,11 +85,30 @@ static void statusBar() {
         g_lcd.drawStr(x, 7, s);
     };
     right(ble::connected() ? (ble::secured() ? "BT*" : "BT") : "bt");
-    right(network::connected() ? "WiFi" : "----");
-    // Campus portal: flag when the network needs a login we haven't managed.
-    if (portal::haveCredentials() && network::connected() && !portal::online()) right("!NET");
+    bool campus = portal::haveCredentials() && network::connected();
+    if (!campus) right(network::connected() ? "WiFi" : "----");
+    else if (!portal::online()) right(portal::paused() ? "IITG-" : "!NET");   // login needed
     if (settings::autoApprove()) right("AUTO");
     if (hybrid::state() != hybrid::State::Idle) right("HY");
+
+    // Campus session next to the clock: "IITG <check> 14m" = online, refreshed in 14 min.
+    if (campus && portal::online()) {
+        int cx = 31;
+        if (cx + 20 < x - 3) {
+            g_lcd.drawStr(cx, 7, "IITG");
+            cx += 22;
+            if (cx + 6 < x - 3) {   // check mark
+                g_lcd.drawLine(cx, 4, cx + 2, 6);
+                g_lcd.drawLine(cx + 2, 6, cx + 6, 1);
+                cx += 9;
+            }
+            if (portal::ownsSession()) {
+                char m[8];
+                snprintf(m, sizeof(m), "%lum", (unsigned long)(portal::secondsToNext() / 60));
+                if (cx + g_lcd.getStrWidth(m) < x - 3) g_lcd.drawStr(cx, 7, m);
+            }
+        }
+    }
     g_lcd.drawHLine(0, 9, W);
 }
 

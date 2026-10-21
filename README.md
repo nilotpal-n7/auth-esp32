@@ -187,9 +187,12 @@ behind your router:
 
 **Menu → Campus net** shows the state, last result and refresh countdown,
 and has **Login now**, **Logout** (pauses auto-login until you log in
-again) and the **Auto-login ON/off** switch. The status bar shows `!NET`
-while the network needs a login. Serial: `portal status|login|logout|on|off`;
-every login, drop and failure is in the event log.
+again) and the **Auto-login ON/off** switch. The home screen shows
+`IITG ✓ 14m` next to the clock while online (14 min to the next refresh),
+`!NET` while the network needs a login and `IITG-` while paused. Serial:
+`portal status|login|logout|on|off`. Every login, drop and failure is in the
+event log with its time (`14:39 IITG session lost`), so you can see when and
+how often the campus ends sessions.
 
 ## Serial console
 
