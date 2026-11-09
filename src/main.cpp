@@ -5,6 +5,7 @@
 // =============================================================================
 
 #include <Arduino.h>
+#include <esp_task_wdt.h>
 #include <nvs_flash.h>
 
 #include "config.h"
@@ -17,7 +18,9 @@
 #include "fido/ctap2.h"
 #include "net/network.h"
 #include "net/portal.h"
+#include "net/telegram.h"
 #include "net/web.h"
+#include "net/wol.h"
 #include "totp/totp.h"
 #include "transport/ble.h"
 #include "transport/hybrid.h"
@@ -25,7 +28,9 @@
 #include "unlock/unlock.h"
 
 // TLS (hybrid tunnel) and P-256 maths need more than the default 8 KB stack.
-SET_LOOP_TASK_STACK_SIZE(16 * 1024);
+// Measured peak (`mem`): ~5.4 KB including a TLS handshake. 12 KB keeps a
+// wide margin and leaves 4 KB more heap for TLS sessions.
+SET_LOOP_TASK_STACK_SIZE(12 * 1024);
 
 static void fatal(const char* what) {
     logf("MAIN", "FATAL: %s", what);
@@ -85,20 +90,27 @@ void setup() {
     network::init();
     network::setOtaProgressHandler(ui::otaProgress);
     portal::init();
+    wol::init();
+    telegram::init();
 
     cli::init();
     logEvent("Boot v" FW_VERSION " (%s)", resetReason());
 #ifdef AUTHKEY_TEST_HOOKS
     logEvent("TEST BUILD - insecure");
 #endif
+    // Hardware (task) watchdog on the main loop: a hang reboots the device.
+    esp_task_wdt_init(LOOP_WATCHDOG_SECS, true);
+    esp_task_wdt_add(nullptr);
     logf("MAIN", "Ready. Type 'help' on the serial console.");
 }
 
 void loop() {
+    esp_task_wdt_reset();
     cli::loop();
     logLoop();
     ble::loop();
     network::loop();
+    telegram::loop();   // before the portal: hangs up ahead of its TLS requests
     portal::loop();
     if (network::otaActive()) return;   // ArduinoOTA drives the screen itself
 
@@ -106,6 +118,7 @@ void loop() {
     static char qr[512];
     if (ble::takeProvisioning(qr, sizeof(qr))) hybrid::start(qr);
 
+    wol::loop();
     hybrid::loop();
     unlock::loop();
     web::loop();

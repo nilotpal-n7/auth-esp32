@@ -1,4 +1,5 @@
 #include "transport/hybrid.h"
+#include "net/telegram.h"
 #include "transport/ble.h"
 #include "net/network.h"
 #include "net/tunnel_ca.h"
@@ -247,6 +248,7 @@ bool start(const char* qrText) {
         return false;
     }
     logEvent("Hybrid: %s", s_reqType[0] ? s_reqType : "request");
+    telegram::releaseTls();   // the tunnel's TLS session needs that RAM
     setState(State::Connecting, "connecting");
     s_startPending = true;
     return true;

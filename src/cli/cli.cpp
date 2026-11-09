@@ -9,6 +9,8 @@
 #include "fido/ctap2.h"
 #include "net/network.h"
 #include "net/portal.h"
+#include "net/telegram.h"
+#include "net/wol.h"
 #include "totp/totp.h"
 #include "transport/ble.h"
 #include "transport/hybrid.h"
@@ -16,6 +18,9 @@
 #include "unlock/unlock.h"
 
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include "net/tunnel_ca.h"
+#include <mbedtls/x509_crt.h>
 
 namespace cli {
 
@@ -59,6 +64,8 @@ static void help() {
 #endif
         "  wifi list | wifi add <ssid> <password> | wifi del <n>\n"
         "  portal status|on|off|login|logout   IITG captive-portal auto-login\n"
+        "  wol | wol wake | wol check | wol ip <ip> | wol auto on|off [min]   wake the server\n"
+        "  tg | tg ping                Telegram bot status | test the TLS connection\n"
         "  wifi connect | wifi reset   reconnect | restore the .env list\n"
         "  time | time set <unix>      show / set UTC clock\n"
         "  tz <POSIX TZ>               clock timezone, e.g. IST-5:30, CET-1CEST,M3.5.0,M10.5.0/3\n"
@@ -103,7 +110,12 @@ static void status() {
         consolef("  Portal:    %s (%s), auto %s, %s\n", portal::stateStr(), portal::user(),
                  portal::enabled() ? "on" : "off", portal::lastResult());
     }
-    consolef("  Heap:      %u free\n", (unsigned)ESP.getFreeHeap());
+    consolef("  Server:    %s %s, %s, auto-wake %s\n", WOL_SERVER_NAME, wol::serverIp(),
+             wol::lastState() < 0 ? "not checked" : wol::lastState() ? "up" : "down",
+             wol::autoWake() ? "on" : "off");
+    consolef("  Telegram:  %s%s%s\n", telegram::stateStr(), telegram::lastError()[0] ? ", " : "",
+             telegram::lastError());
+    consolef("  Heap:      %u free, largest block %u\n", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
 }
 
 static void cmdTotp(int argc, char** argv) {
@@ -194,6 +206,43 @@ static void cmdPortal(int argc, char** argv) {
     } else {
         consoleWrite("ERR usage: portal status|on|off|login|logout\n");
     }
+}
+
+// --- Server wake-on-LAN ---------------------------------------------------------
+static void cmdWol(int argc, char** argv) {
+    const char* sub = argc > 1 ? argv[1] : "status";
+    if (!strcmp(sub, "wake")) {
+        wol::wake("console");
+        consoleWrite("OK sending magic packets (3x, 1 s apart); watching for 3 min\n");
+    } else if (!strcmp(sub, "check")) {
+        uint16_t port;
+        uint32_t ms = 0;
+        if (wol::check(&port, &ms)) consolef("UP %s answers on port %u (%lu ms)\n", wol::serverIp(), port, (unsigned long)ms);
+        else consolef("DOWN %s: no answer on %d or %d\n", wol::serverIp(), WOL_CHECK_PORT, WOL_CHECK_PORT_ALT);
+    } else if (!strcmp(sub, "ip") && argc >= 3) {
+        if (wol::setServerIp(argv[2])) consolef("OK server is %s\n", wol::serverIp());
+        else consolef("ERR not an IPv4 address (%s)\n", argv[2]);
+    } else if (!strcmp(sub, "auto") && argc >= 3) {
+        wol::setAutoWake(!strcmp(argv[2], "on"), argc >= 4 ? atoi(argv[3]) : 0);
+        consolef("OK auto-wake %s (%d min)\n", wol::autoWake() ? "on" : "off", wol::autoWakeMinutes());
+    } else {
+        consolef("  server:    %s at %s, %s\n", WOL_SERVER_NAME, wol::serverIp(),
+                 wol::lastState() < 0 ? "not checked yet" : wol::lastState() ? "up" : "down");
+        consolef("  auto-wake: %s (%d min)%s\n", wol::autoWake() ? "on" : "off", wol::autoWakeMinutes(),
+                 wol::waking() ? ", wake in progress" : "");
+    }
+}
+
+static void cmdTelegram(int argc, char** argv) {
+    if (argc >= 2 && !strcmp(argv[1], "ping")) {
+        char out[160];
+        bool ok = telegram::ping(out, sizeof(out));
+        consolef("%s %s\n", ok ? "OK" : "ERR", out);
+        return;
+    }
+    consolef("  bot:       %s\n", telegram::stateStr());
+    if (telegram::lastError()[0]) consolef("  last error: %s\n", telegram::lastError());
+    if (telegram::lastIgnoredChat()) consolef("  last ignored chat: %lld\n", telegram::lastIgnoredChat());
 }
 
 // --- PC unlock (Windows sign-in) -------------------------------------------
@@ -338,6 +387,56 @@ static void execute(char* line) {
     else if (!strcmp(cmd, "totp")) cmdTotp(argc, argv);
     else if (!strcmp(cmd, "wifi")) cmdWifi(argc, argv);
     else if (!strcmp(cmd, "portal")) cmdPortal(argc, argv);
+    else if (!strcmp(cmd, "wol")) cmdWol(argc, argv);
+    else if (!strcmp(cmd, "tg")) cmdTelegram(argc, argv);
+    else if (!strcmp(cmd, "tlstest")) {
+        // Verified TLS connection to the hybrid tunnel server: shows whether
+        // its certificate chain still verifies and how much RAM TLS needs.
+        uint32_t before = ESP.getFreeHeap();
+        WiFiClientSecure c;
+        c.setCACert(TUNNEL_ROOT_CAS);
+        c.setHandshakeTimeout(12);
+        uint32_t t0 = millis();
+        bool ok = c.connect("cable.ua5v.com", 443);
+        uint32_t during = ESP.getFreeHeap();
+        char why[100] = "";
+        int code = ok ? 0 : c.lastError(why, sizeof(why));
+        c.stop();
+        consolef("%s tunnel TLS %lu ms, heap before %u, after handshake %u, min ever %u, err %d %s\n", ok ? "OK" : "ERR",
+                 (unsigned long)(millis() - t0), (unsigned)before, (unsigned)during, (unsigned)ESP.getMinFreeHeap(), code, why);
+        if (!ok) {
+            // Fetch the chain without verification (nothing is sent), then let
+            // mbedTLS verify it with our roots to get the real reason.
+            WiFiClientSecure d;
+            d.setInsecure();
+            d.setHandshakeTimeout(12);
+            if (!d.connect("cable.ua5v.com", 443)) { consoleWrite("  (diagnostic connect failed)\n"); return; }
+            const mbedtls_x509_crt* crt = d.getPeerCertificate();
+            mbedtls_x509_crt ca;
+            mbedtls_x509_crt_init(&ca);
+            int rc = mbedtls_x509_crt_parse(&ca, (const unsigned char*)TUNNEL_ROOT_CAS, strlen(TUNNEL_ROOT_CAS) + 1);
+            uint32_t flags = 0;
+            int vr = crt ? mbedtls_x509_crt_verify((mbedtls_x509_crt*)crt, &ca, nullptr, "cable.ua5v.com", &flags,
+                                                   nullptr, nullptr) : -1;
+            char info[240] = "";
+            mbedtls_x509_crt_verify_info(info, sizeof(info), "", flags);
+            for (char* q = info; *q; q++) if (*q == '\n') *q = ';';
+            for (const mbedtls_x509_crt* x = crt; x; x = x->next) {
+                char sub[90] = "?";
+                mbedtls_x509_dn_gets(sub, sizeof(sub), &x->subject);
+                consolef("  chain: %s\n", sub);
+            }
+            consolef("  roots parsed: rc=%d; verify=%d flags=0x%08lx %s; min heap %u\n", rc, vr, (unsigned long)flags,
+                     info, (unsigned)ESP.getMinFreeHeap());
+            mbedtls_x509_crt_free(&ca);
+            d.stop();
+        }
+    }
+    else if (!strcmp(cmd, "mem")) {
+        consolef("heap %u free, largest %u, min ever %u; loop stack: %u bytes never used\n",
+                 (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap(), (unsigned)ESP.getMinFreeHeap(),
+                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
+    }
     else if (!strcmp(cmd, "passkeys") || !strcmp(cmd, "passkey")) cmdPasskeys(argc, argv);
     else if (!strcmp(cmd, "unlock")) cmdUnlock(argc, argv);
     else if (!strcmp(cmd, "ctap")) cmdCtap(argc, argv);

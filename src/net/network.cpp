@@ -4,6 +4,7 @@
 #include "core/settings.h"
 
 #include <ArduinoOTA.h>
+#include <esp_task_wdt.h>
 #include <Preferences.h>
 #include <WiFi.h>
 #include <sys/time.h>
@@ -148,6 +149,7 @@ static void startOta() {
     });
     ArduinoOTA.onEnd([]() { logEvent("OTA done, rebooting"); logFlush(); });
     ArduinoOTA.onProgress([](unsigned done, unsigned total) {
+        esp_task_wdt_reset();   // the whole upload runs inside one loop() call
         if (s_otaProgress) s_otaProgress(done, total);
     });
     ArduinoOTA.onError([](ota_error_t e) {

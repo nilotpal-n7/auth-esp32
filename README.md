@@ -293,6 +293,72 @@ Windows notifications are turned off (Settings → System → Notifications), it
 shows a small pop-up that closes itself instead. `qr_bridge.py --no-notify`
 turns this off.
 
+### Wake the Proxmox server from Telegram
+
+The device can wake the Proxmox host (`pve`, Dell OptiPlex 7040, MAC
+`64:00:6a:2b:36:9f`) with wake-on-LAN and tells you over Telegram when it is
+up. The bot polls Telegram, so nothing has to be reachable from the internet.
+
+| Command | What it does |
+| --- | --- |
+| `/wake` | Magic packet (6× `FF` + 16× MAC, UDP 9) to 255.255.255.255 and 172.16.119.255, 3 times 1 s apart; then checks every 10 s and reports 🟢 when it's up, or 🔴 after 3 min |
+| `/status` | 🟢 up / 🔴 down: TCP connect to the Proxmox UI (8006), falling back to SSH (22) |
+| `/autowake on\|off [min]` | Wake it when it has been unreachable for N minutes (default 10, at most 3 tries until it's seen up again). **Off by default**, so it doesn't fight a deliberate shutdown. Kept in NVS |
+| `/setip <ip>` | The server's address (DHCP can change it; default 172.16.114.175). Kept in NVS |
+| `/help` | The list |
+
+Setup:
+
+1. Create a bot with [@BotFather](https://t.me/BotFather) and put its token in
+   `.env` as `TELEGRAM_BOT_TOKEN=`. Leave `TELEGRAM_CHAT_ID=` empty and flash.
+2. Send your bot any message. With no chat ID set, the device only logs the
+   sender's chat ID (serial: `[TG] chat ID 123456789 ...`, and the event log).
+3. Put that number in `.env` as `TELEGRAM_CHAT_ID=` (comma-separate several)
+   and flash again. Only those chats get answers; others are ignored and
+   logged to serial.
+
+Console (USB) equivalents for testing: `wol`, `wol wake`, `wol check`,
+`wol ip <ip>`, `wol auto on|off [min]`, `tg`, and `tg ping` (a verified TLS
+connection to Telegram, no token needed). Commands older than 2 minutes
+(sent while the AuthKey was off) are ignored, so a stale `/wake` never
+starts the server later.
+
+The Telegram certificate is verified against Go Daddy Root G2. A failed check
+is logged (`TG cert check failed`) and never bypassed. The campus network
+passes Telegram through without TLS inspection. Only one TLS connection fits
+in RAM next to Bluetooth, so the bot hangs up just before the campus portal's
+refresh or login and during hybrid sign-ins, then reconnects. A task
+watchdog reboots the device if the main loop ever stalls for 60 s.
+
+RAM is the tight resource: a TLS session peaks at ~54 KB and the core's
+mbedTLS has fixed 16 KB buffers. When the heap runs short, mbedTLS reports it
+as "certificate verification failed", so `mem` (free heap, largest block,
+loop-stack use) and `tlstest` (a verified connection to the hybrid tunnel
+server, with the chain and mbedTLS's reason on failure) are there to tell
+the two apart.
+
+**Server BIOS (F2 at boot), needed for this to work:**
+
+- Power Management → **AC Recovery = Power On**: the server comes back by
+  itself after a power cut.
+- **Deep Sleep Control = Disabled**: otherwise the NIC is fully off and
+  wake-on-LAN can't work.
+- **Wake on LAN/WLAN = LAN Only**.
+
+If `/wake` does nothing, test from a laptop on the same WiFi to see whether
+the device or the network is the problem:
+
+```powershell
+$mac = [byte[]](0x64,0x00,0x6a,0x2b,0x36,0x9f)
+$pkt = [byte[]]((,0xFF * 6) + ($mac * 16))
+$udp = New-Object Net.Sockets.UdpClient; $udp.EnableBroadcast = $true
+foreach ($ip in '255.255.255.255','172.16.119.255') { [void]$udp.Send($pkt, $pkt.Length, $ip, 9) }
+```
+
+If that doesn't wake it either, the WiFi access point may be dropping
+broadcasts towards the wired side. Then use a wired ESP32 (WT32-ETH01,
+Olimex ESP32-POE) on the same LAN.
+
 ### Web page
 
 `http://authkey-esp32.local/` (or the IP shown in **Menu → Device info**)
@@ -391,7 +457,7 @@ src/
   fido/                  CTAP 2.0 engine, credential derivation & storage
   transport/ble.*        NimBLE: FIDO BLE service, keyboard, pairing, hybrid adverts
   transport/hybrid.*     caBLE v2: tunnel, Noise KNpsk0, encrypted CTAP
-  net/                   WiFi/NTP/OTA, campus portal login, web page, WebSocket client, root CAs
+  net/                   WiFi/NTP/OTA, campus portal login, web page, Telegram bot + wake-on-LAN, root CAs
   totp/                  TOTP storage and generation
   ui/                    OLED screens, buttons
   cli/                   USB serial console

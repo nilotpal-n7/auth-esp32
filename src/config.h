@@ -67,6 +67,45 @@
 #define PORTAL_CRED_BACKOFF_SECS 1800          // after repeated rejections (avoids account lockout)
 #define PORTAL_MAX_FAILS        3              // rejections before the long back-off
 
+// --- Server wake-on-LAN (Proxmox host "pve", Dell OptiPlex 7040) ------------
+// The IP comes from DHCP and can change: `/setip` (Telegram) or `wol ip`
+// (console) overrides this default and is kept in NVS.
+#define WOL_SERVER_NAME         "pve"
+#define WOL_SERVER_MAC          {0x64, 0x00, 0x6A, 0x2B, 0x36, 0x9F}
+#define WOL_DEFAULT_IP          "172.16.114.175"
+#define WOL_DIRECTED_BROADCAST  "172.16.119.255"   // 172.16.112.0/21
+#define WOL_UDP_PORT            9
+#define WOL_CHECK_PORT          8006               // Proxmox web UI
+#define WOL_CHECK_PORT_ALT      22                 // SSH, if 8006 doesn't answer
+#define WOL_CONNECT_TIMEOUT_MS  1500               // per port: a check blocks at most ~3 s
+#define WOL_PACKETS             3                  // magic packets per wake, 1 s apart
+#define WOL_WATCH_SECS          180                // after a wake: report when it is up
+#define WOL_WATCH_EVERY_SECS    10
+#define WOL_AUTO_CHECK_SECS     60                 // auto-wake: how often to look
+#define WOL_AUTO_DEFAULT_MIN    10                 // auto-wake: down this long -> wake
+#define WOL_AUTO_MAX_TRIES      3                  // then wait until it is seen up again
+
+// --- Telegram bot ------------------------------------------------------------
+// Token and allowed chat IDs come from .env (TELEGRAM_BOT_TOKEN / _CHAT_ID).
+#ifndef SECRET_TG_TOKEN
+#define SECRET_TG_TOKEN ""
+#endif
+#ifndef SECRET_TG_CHATS
+#define SECRET_TG_CHATS ""
+#endif
+#define TG_HOST                 "api.telegram.org"
+#define TG_LONG_POLL_SECS       25                 // Telegram holds getUpdates open this long
+#define TG_MAX_COMMAND_AGE_SECS 120                // older commands (queued while off) are ignored
+#define TG_BACKOFF_MIN_SECS     5
+#define TG_BACKOFF_MAX_SECS     120
+#define TG_MIN_HEAP             20000              // largest free block: TLS allocates 16 KB record buffers
+#define TG_MIN_FREE_HEAP        62000              // total free heap needed (TLS peaks at ~54 KB)
+
+// --- Watchdog ----------------------------------------------------------------
+// The longest legitimate stall in loop() is a TLS handshake or a WiFi
+// reconnect (~10-15 s); OTA resets the watchdog from its progress callback.
+#define LOOP_WATCHDOG_SECS      60
+
 // --- TOTP --------------------------------------------------------------------
 #define TOTP_MAX_ACCOUNTS   24
 
