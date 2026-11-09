@@ -62,6 +62,20 @@ pre{margin:0;font:12px/1.5 ui-monospace,Consolas,monospace;white-space:pre-wrap;
 <div class="auth hidden">
 <div class="card"><h2>Event log <button onclick="loadLog()">Refresh</button></h2><pre id="log"></pre></div>
 
+<div class="card"><h2>Servers (wake-on-LAN) <button id="wolBtn" onclick="wolSwitch()">…</button></h2><ul id="hostlist"></ul>
+<details style="margin-top:8px"><summary>Add or change a machine</summary>
+<div class="grid" style="margin-top:8px">
+<input id="hName" placeholder="name, e.g. nas"><input id="hMac" placeholder="MAC 64:00:6a:2b:36:9f">
+<input id="hIp" placeholder="IP (optional)"><input id="hPorts" placeholder="ports to check, e.g. 8006,22">
+<input id="hBc" placeholder="broadcast (optional)"></div>
+<div class="row" style="margin-top:8px"><button class="primary" onclick="saveHost()">Save</button><span class="muted">Same name = update.</span></div></details></div>
+
+<div class="card"><h2>Remote (Telegram)</h2>
+<div class="grid"><div><div class="k">Bot</div><div class="v" id="tgState">-</div></div>
+<div><div class="k">Notifications</div><div class="v"><select id="tgNotify" onchange="setNotify(this.value)"><option value="0">off</option><option value="1">important</option><option value="2">all events</option></select></div></div>
+<div><div class="k">TOTP codes over Telegram</div><div class="v" id="tgCodes">-</div></div></div>
+<p class="muted" style="margin:8px 0 0">Send /menu to your bot. Codes over Telegram can only be allowed on the AuthKey (Menu → Remote).</p></div>
+
 <div class="card"><h2>Passkeys <span class="muted" id="pkcap"></span></h2><ul id="pklist"></ul></div>
 
 <div class="card"><h2>Authenticator (TOTP)</h2><ul id="totplist"></ul>
@@ -107,7 +121,23 @@ async function loadPk(){const j=await api('/api/passkeys');j.passkeys.sort((a,b)
 $('pklist').innerHTML=j.passkeys.map(p=>'<li><span class="name"><b>'+esc(p.rp)+'</b><br><span class="muted">'+esc(p.user||p.display||'(no name)')+'</span></span><button class="danger" onclick="delPk('+p.slot+',\''+esc(p.rp).replace(/'/g,'')+'\')">Delete</button></li>').join('')||'<li class="muted">No passkeys stored on the device.</li>'}
 async function loadTotp(){const j=await api('/api/totp');
 $('totplist').innerHTML=j.accounts.map(a=>'<li><span class="name">'+esc(a.name)+' <span class="muted">'+a.digits+' digits, '+a.period+'s, '+(a.algo==1?'SHA1':'SHA'+a.algo)+'</span></span><button class="danger" onclick="delTotp('+a.i+')">Delete</button></li>').join('')||'<li class="muted">No accounts.</li>'}
-function loadAll(){loadLog().catch(()=>{});loadPk().catch(()=>{});loadTotp().catch(()=>{})}
+function ago(a){return a<0?'not checked':a<120?a+' s ago':Math.round(a/60)+' min ago'}
+async function loadHosts(){const j=await api('/api/hosts');$('wolBtn').textContent='Wake-on-LAN: '+(j.enabled?'ON':'off');
+$('hostlist').innerHTML=j.hosts.map(h=>{const st=h.waking?'⏳':h.state>0?'🟢':h.state==0?'🔴':'⚪';
+return '<li><span class="name">'+st+' <b>'+esc(h.name)+'</b> <span class="muted">'+esc(h.ip||'no IP')+' · '+esc(h.mac)+' · '+ago(h.age)+(h.auto?' · auto-wake '+h.autoMin+' min':'')+'</span></span>'+
+'<span class="row"><button class="primary" onclick="hostDo(\'wake\','+h.i+')">Wake</button><button onclick="hostDo(\'check\','+h.i+')">Check</button>'+
+'<button onclick="hostAuto('+h.i+','+(h.auto?0:1)+')">Auto '+(h.auto?'on':'off')+'</button><button onclick="editHost('+h.i+')">Edit</button><button class="danger" onclick="delHost('+h.i+',\''+esc(h.name)+'\')">✕</button></span></li>'}).join('')||'<li class="muted">No machines yet.</li>';
+window._hosts=j.hosts}
+async function hostDo(what,i){try{const r=await post('/api/hosts/'+what+'?i='+i);msg(what=='wake'?'Magic packets on the way; watching 3 min':(r.up?'🟢 up (port '+r.port+', '+r.ms+' ms)':'🔴 down'));loadHosts()}catch(e){msg(e.message)}}
+async function hostAuto(i,on){const m=on?prompt('Wake it after how many minutes unreachable?','10'):0;if(on&&!m)return;try{await post('/api/hosts/auto?i='+i+'&on='+on+'&min='+(m||0));loadHosts()}catch(e){msg(e.message)}}
+async function delHost(i,n){if(!confirm('Remove '+n+'?'))return;try{await post('/api/hosts/delete?i='+i);loadHosts()}catch(e){msg(e.message)}}
+function editHost(i){const h=window._hosts[i];$('hName').value=h.name;$('hMac').value=h.mac;$('hIp').value=h.ip;$('hPorts').value=h.ports;$('hBc').value=h.broadcast;document.querySelector('details:has(#hName)').open=true}
+async function saveHost(){const q=['name','mac','ip','ports','broadcast'].map((k,n)=>k+'='+encodeURIComponent($(['hName','hMac','hIp','hPorts','hBc'][n]).value.trim())).join('&');
+try{await post('/api/hosts/save?'+q);msg('Saved');loadHosts()}catch(e){msg(e.message)}}
+async function wolSwitch(){try{const j=await api('/api/hosts');await post('/api/wol?on='+(j.enabled?0:1));loadHosts()}catch(e){msg(e.message)}}
+async function loadRemote(){const r=await api('/api/remote');$('tgState').textContent=r.telegram+(r.error?' ('+r.error+')':'');$('tgNotify').value=r.notify;$('tgCodes').textContent=r.codes?'allowed':'off'}
+async function setNotify(v){try{await post('/api/remote?notify='+v);msg('Saved')}catch(e){msg(e.message)}}
+function loadAll(){loadLog().catch(()=>{});loadPk().catch(()=>{});loadTotp().catch(()=>{});loadHosts().catch(()=>{});loadRemote().catch(()=>{})}
 async function portal(d){try{await post('/api/portal?do='+d);msg({login:'Logging in...',logout:'Logged out; auto-login paused',on:'Auto-login on',off:'Auto-login off'}[d]);setTimeout(()=>{status();loadLog()},1500)}catch(e){msg(e.message)}}
 async function delPk(slot,rp){if(!confirm('Delete the passkey for '+rp+'? You will not be able to sign in to it with this key any more.'))return;
 try{await post('/api/passkeys/delete?slot='+slot);msg('Deleted');loadPk();status()}catch(e){msg(e.message)}}
@@ -115,5 +145,5 @@ async function delTotp(i){if(!confirm('Delete this authenticator account from th
 async function addTotp(){const v=$('otp').value.trim();if(!v)return;try{await post('/api/totp/add',v);$('otp').value='';msg('Added');loadTotp();status()}catch(e){msg(e.message)}}
 async function sendQr(){const v=$('qr').value.trim();if(!v)return;try{await post('/api/hybrid',v);msg('Sent; watch the AuthKey screen');$('qr').value=''}catch(e){msg(e.message)}}
 async function stopQr(){try{await post('/api/hybrid','stop')}catch(e){}}
-status();setInterval(status,3000);setInterval(()=>{if(authed)loadLog().catch(()=>{})},15000);
+status();setInterval(status,3000);setInterval(()=>{if(authed){loadLog().catch(()=>{});loadHosts().catch(()=>{})}},15000);
 </script></body></html>)HTML";

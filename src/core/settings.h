@@ -17,6 +17,8 @@ void setTimezone(const char* tz);
 bool portalAuto();                // Captive-portal auto-login (default on)
 void setPortalAuto(bool on);
 bool keyboard();                  // Bluetooth keyboard (types TOTP codes); applies after reboot
+bool webPage();                   // management web page on the LAN (default on)
+void setWebPage(bool on);
 void setKeyboard(bool on);
 
 // --- FIDO device secrets ---

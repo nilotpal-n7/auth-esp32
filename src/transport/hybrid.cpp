@@ -1,5 +1,6 @@
 #include "transport/hybrid.h"
 #include "net/telegram.h"
+#include <new>
 #include "transport/ble.h"
 #include "net/network.h"
 #include "net/tunnel_ca.h"
@@ -30,8 +31,30 @@ static uint8_t  s_readKey[32], s_writeKey[32];
 static uint32_t s_readSeq = 0, s_writeSeq = 0;
 static uint32_t s_stateSince = 0, s_lastActivity = 0;
 static bool     s_startPending = false;
-static WsClient s_ws;
-static uint8_t  s_buf[1200];
+// Buffers only needed during a session (~7 KB): allocated by start() and
+// freed by stop(), so the RAM is free for other TLS users (Telegram) the rest
+// of the time.
+struct Session {
+    WsClient ws;
+    uint8_t  buf[1200];                 // received frame
+    uint8_t  pt[1200];                  // decrypted frame
+    uint8_t  padded[1100], ct[1120];    // outgoing message
+    uint8_t  msg[FIDO_MAX_MSG + 1];     // CTAP reply framing
+};
+static Session* s_ses = nullptr;
+
+static void freeSession() {
+    if (!s_ses) return;
+    s_ses->ws.close();
+    // Wipe the plaintext buffers only: the WebSocket owns heap objects that
+    // its destructor must still see.
+    crypto::wipe(s_ses->buf, sizeof(s_ses->buf));
+    crypto::wipe(s_ses->pt, sizeof(s_ses->pt));
+    crypto::wipe(s_ses->padded, sizeof(s_ses->padded));
+    crypto::wipe(s_ses->msg, sizeof(s_ses->msg));
+    delete s_ses;
+    s_ses = nullptr;
+}
 
 static void setState(State st, const char* text) {
     s_state = st;
@@ -154,16 +177,18 @@ static void crypterNonce(uint32_t seq, uint8_t out[12]) {
 }
 
 static bool sendEncrypted(const uint8_t* msg, size_t len) {
-    static uint8_t padded[1100], ct[1120];
+    if (!s_ses) return false;
+    uint8_t* padded = s_ses->padded;
+    uint8_t* ct = s_ses->ct;
     size_t paddedLen = (len + 1 + 31) & ~(size_t)31;
-    if (paddedLen > sizeof(padded)) return false;
+    if (paddedLen > sizeof(s_ses->padded)) return false;
     memcpy(padded, msg, len);
     memset(padded + len, 0, paddedLen - len);
     padded[paddedLen - 1] = (uint8_t)(paddedLen - len - 1);
     uint8_t iv[12];
     crypterNonce(s_writeSeq++, iv);
     if (!crypto::aesGcmSeal(s_writeKey, iv, nullptr, 0, padded, paddedLen, ct)) return false;
-    return s_ws.sendBinary(ct, paddedLen + 16);
+    return s_ses->ws.sendBinary(ct, paddedLen + 16);
 }
 
 static int decrypt(const uint8_t* ct, size_t len, uint8_t* out) {
@@ -180,8 +205,8 @@ static int decrypt(const uint8_t* ct, size_t len, uint8_t* out) {
 }
 
 static void ctapReply(const uint8_t* data, size_t len) {
-    static uint8_t msg[FIDO_MAX_MSG + 1];
-    if (len > FIDO_MAX_MSG) return;
+    if (!s_ses || len > FIDO_MAX_MSG) return;
+    uint8_t* msg = s_ses->msg;
     msg[0] = kMsgCTAP;
     memcpy(msg + 1, data, len);
     if (!sendEncrypted(msg, len + 1)) logf("HYBRID", "failed to send reply");
@@ -242,6 +267,7 @@ static bool parseQr(const char* text) {
 
 bool start(const char* qrText) {
     if (s_state != State::Idle && s_state != State::Failed) stop("replaced");
+    freeSession();
     if (!parseQr(qrText)) {
         logf("HYBRID", "invalid FIDO QR data");
         setState(State::Failed, "bad QR");
@@ -249,6 +275,11 @@ bool start(const char* qrText) {
     }
     logEvent("Hybrid: %s", s_reqType[0] ? s_reqType : "request");
     telegram::releaseTls();   // the tunnel's TLS session needs that RAM
+    s_ses = new (std::nothrow) Session();
+    if (!s_ses) {
+        setState(State::Failed, "out of memory");
+        return false;
+    }
     setState(State::Connecting, "connecting");
     s_startPending = true;
     return true;
@@ -256,6 +287,10 @@ bool start(const char* qrText) {
 
 static void connectTunnel() {
     s_startPending = false;
+    if (!s_ses) {
+        setState(State::Failed, "no session");
+        return;
+    }
     if (!network::ensureConnected()) {
         setState(State::Failed, "no WiFi");
         return;
@@ -267,7 +302,7 @@ static void connectTunnel() {
     hexEncode(tunnelId, sizeof(tunnelId), path + strlen(path), true);
 
     char routingHex[16];
-    if (!s_ws.connect(TUNNEL_HOST, path, "fido.cable", TUNNEL_ROOT_CAS,
+    if (!s_ses->ws.connect(TUNNEL_HOST, path, "fido.cable", TUNNEL_ROOT_CAS,
                       "X-caBLE-Routing-ID", routingHex, sizeof(routingHex))) {
         setState(State::Failed, "tunnel failed");
         return;
@@ -275,7 +310,7 @@ static void connectTunnel() {
     uint8_t routingId[3];
     if (hexDecode(routingHex, strlen(routingHex), routingId, 3) != 3) {
         logf("HYBRID", "missing/invalid routing ID '%s'", routingHex);
-        s_ws.close();
+        s_ses->ws.close();
         setState(State::Failed, "tunnel failed");
         return;
     }
@@ -299,12 +334,10 @@ static void connectTunnel() {
 
 void stop(const char* reason) {
     if (s_state == State::Idle) return;
-    if (s_state == State::Ready && s_ws.isOpen()) {
-        // Nothing to send: authenticators never send shutdown frames.
-    }
-    s_ws.close();
+    if (s_ses) s_ses->ws.close();
     ble::stopHybridAdvert();
-    ctap::cancel(CtapTransport::Hybrid);
+    ctap::cancel(CtapTransport::Hybrid);   // may still call ctapReply: free afterwards
+    freeSession();
     crypto::wipe(s_secret, sizeof(s_secret));
     crypto::wipe(s_psk, sizeof(s_psk));
     crypto::wipe(s_readKey, sizeof(s_readKey));
@@ -320,6 +353,7 @@ void loop() {
         return;
     }
     if (s_state == State::Failed && millis() - s_stateSince > 5000) {
+        freeSession();
         s_state = State::Idle;
         strlcpy(s_status, "idle", sizeof(s_status));
         ble::stopHybridAdvert();
@@ -337,8 +371,10 @@ void loop() {
         return;
     }
 
+    if (!s_ses) { stop("no session"); return; }
     size_t len = 0;
-    int r = s_ws.poll(s_buf, sizeof(s_buf), &len);
+    uint8_t* buf = s_ses->buf;
+    int r = s_ses->ws.poll(buf, sizeof(s_ses->buf), &len);
     if (r < 0) {
         bool wasReady = s_state == State::Ready;
         stop("tunnel closed");
@@ -350,8 +386,8 @@ void loop() {
 
     if (s_state == State::Advertising) {
         uint8_t response[81];
-        bool ok = respondToHandshake(s_buf, len, response);
-        if (ok && !(ok = s_ws.sendBinary(response, sizeof(response)))) logf("HYBRID", "send response failed");
+        bool ok = respondToHandshake(buf, len, response);
+        if (ok && !(ok = s_ses->ws.sendBinary(response, sizeof(response)))) logf("HYBRID", "send response failed");
         if (ok && !(ok = sendPostHandshake())) logf("HYBRID", "send post-handshake failed");
         if (!ok) {
             stop("handshake failed");
@@ -364,8 +400,8 @@ void loop() {
     }
 
     // Ready: [type][payload] after decryption and unpadding.
-    static uint8_t pt[1200];
-    int n = decrypt(s_buf, len, pt);
+    uint8_t* pt = s_ses->pt;
+    int n = decrypt(buf, len, pt);
     if (n < 1) {
         stop("decrypt failed");
         return;

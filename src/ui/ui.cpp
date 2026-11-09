@@ -8,6 +8,8 @@
 #include "fido/ctap2.h"
 #include "net/network.h"
 #include "net/portal.h"
+#include "net/telegram.h"
+#include "net/wol.h"
 #include "totp/totp.h"
 #include "transport/ble.h"
 #include "transport/hybrid.h"
@@ -29,7 +31,7 @@ static const int W = 128;
 
 enum class Screen : uint8_t {
     Home, Menu, Passkeys, PasskeyDetail, PinMenu, PinEntry, Wifi, Portal, Bluetooth, Log, Info,
-    ConfirmReset,
+    ConfirmReset, Servers, Server, Remote,
 };
 
 enum class PinPurpose : uint8_t { CtapUv, Approval, SetNew, SetConfirm, ChangeOld, RemoveOld };
@@ -39,6 +41,8 @@ static int      s_totpIndex = 0;
 static int      s_menuIndex = 0;
 static int      s_listIndex = 0;
 static int      s_portalSel = 0;
+static int      s_serverIndex = 0;     // machine shown on the Server screen
+static int      s_actionSel = 0;       // bottom selector on Server / Remote
 static int      s_listSlots[FIDO_MAX_RESIDENT];
 static int      s_listCount = 0;
 static uint32_t s_lastInput = 0;
@@ -57,8 +61,8 @@ static char       s_pinFirst[FIDO_PIN_MAX_LEN + 1];
 static Screen     s_pinReturn = Screen::Menu;
 
 static const char* MENU_ITEMS[] = {
-    "Passkeys", "Auto-approve", "Device PIN", "WiFi", "Campus net", "Bluetooth", "Event log",
-    "Device info", "Reset passkeys", "Back",
+    "Passkeys", "Auto-approve", "Device PIN", "WiFi", "Campus net", "Servers", "Remote",
+    "Bluetooth", "Event log", "Device info", "Reset passkeys", "Back",
 };
 static const int MENU_COUNT = sizeof(MENU_ITEMS) / sizeof(MENU_ITEMS[0]);
 
@@ -348,6 +352,94 @@ static void drawPortal() {
     footer("U/D choose  OK do  hold OK back");
 }
 
+// --- Servers (wake-on-LAN) ----------------------------------------------------
+
+static const char* hostStateWord(int i) {
+    int st = wol::lastState(i);
+    return wol::waking(i) ? "waking" : st < 0 ? "?" : st ? "UP" : "down";
+}
+
+// Rows: one per machine, then the global switch.
+static const char* serverItemText(int i) {
+    static char buf[24];
+    if (i < wol::count()) snprintf(buf, sizeof(buf), "%-11.11s %s", wol::host(i)->name, hostStateWord(i));
+    else snprintf(buf, sizeof(buf), "Wake-on-LAN: %s", wol::enabled() ? "ON" : "off");
+    return buf;
+}
+
+static const char* serverAction(int i) {
+    const wol::Host* h = wol::host(s_serverIndex);
+    switch (i) {
+        case 0: return "Wake";
+        case 1: return "Check now";
+        case 2: return h && h->autoWake ? "Auto-wake: ON" : "Auto-wake: off";
+        default: return "Back";
+    }
+}
+
+static void drawServer() {
+    const wol::Host* h = wol::host(s_serverIndex);
+    if (!h) { s_screen = Screen::Servers; return; }
+    g_lcd.setFont(u8g2_font_6x10_tr);
+    g_lcd.drawStr(0, 8, h->name);
+    g_lcd.setFont(u8g2_font_5x7_tr);
+    g_lcd.drawStr(W - g_lcd.getStrWidth(hostStateWord(s_serverIndex)), 8, hostStateWord(s_serverIndex));
+    g_lcd.drawHLine(0, 10, W);
+    char line[40], mac[18];
+    wol::formatMac(h->mac, mac, sizeof(mac));
+    snprintf(line, sizeof(line), "IP  %s", h->ip[0] ? h->ip : "(none)");
+    g_lcd.drawStr(0, 19, line);
+    snprintf(line, sizeof(line), "MAC %s", mac);
+    g_lcd.drawStr(0, 27, line);
+    uint32_t age = wol::lastCheckAgeS(s_serverIndex);
+    if (age == UINT32_MAX) strlcpy(line, "not checked yet", sizeof(line));
+    else snprintf(line, sizeof(line), "checked %lu%s ago", (unsigned long)(age < 120 ? age : age / 60), age < 120 ? "s" : "m");
+    g_lcd.drawStr(0, 35, line);
+    snprintf(line, sizeof(line), "auto-wake %s%s", h->autoWake ? "on " : "off", h->autoWake ? "" : "");
+    if (h->autoWake) snprintf(line, sizeof(line), "auto-wake on, %u min", h->autoMin);
+    g_lcd.drawStr(0, 43, line);
+    g_lcd.drawBox(0, 46, W, 10);
+    g_lcd.setDrawColor(0);
+    snprintf(line, sizeof(line), "< %s >", serverAction(s_actionSel));
+    centered(54, line);
+    g_lcd.setDrawColor(1);
+    footer("U/D choose  OK do  hold OK back");
+}
+
+// --- Remote access (Telegram, web page) ---------------------------------------------
+
+static const char* remoteAction(int i) {
+    static char buf[28];
+    switch (i) {
+        case 0: snprintf(buf, sizeof(buf), "Notify: %s", telegram::notifyLevelName(telegram::notifyLevel())); return buf;
+        case 1: return telegram::remoteCodes() ? "TG codes: allowed" : "TG codes: off";
+        case 2: return settings::webPage() ? "Web page: ON" : "Web page: off";
+        default: return "Back";
+    }
+}
+
+static void drawRemote() {
+    g_lcd.setFont(u8g2_font_6x10_tr);
+    g_lcd.drawStr(0, 8, "Remote");
+    g_lcd.drawHLine(0, 10, W);
+    g_lcd.setFont(u8g2_font_5x7_tr);
+    char line[44];
+    snprintf(line, sizeof(line), "Telegram: %.30s", telegram::stateStr());
+    g_lcd.drawStr(0, 19, line);
+    g_lcd.drawStr(0, 27, telegram::lastError()[0] ? telegram::lastError() : "");
+    if (network::connected() && settings::webPage()) snprintf(line, sizeof(line), "Web: http://%s/", network::ip().c_str());
+    else strlcpy(line, settings::webPage() ? "Web: waiting for WiFi" : "Web page off", sizeof(line));
+    g_lcd.drawStr(0, 35, line);
+    snprintf(line, sizeof(line), "Codes over Telegram: %s", telegram::remoteCodes() ? "YES" : "no");
+    g_lcd.drawStr(0, 43, line);
+    g_lcd.drawBox(0, 46, W, 10);
+    g_lcd.setDrawColor(0);
+    snprintf(line, sizeof(line), "< %s >", remoteAction(s_actionSel));
+    centered(54, line);
+    g_lcd.setDrawColor(1);
+    footer("U/D choose  OK do  hold OK back");
+}
+
 static void drawBluetooth() {
     g_lcd.setFont(u8g2_font_6x10_tr);
     g_lcd.drawStr(0, 8, "Bluetooth");
@@ -541,6 +633,11 @@ static void draw() {
             }
             case Screen::Wifi: drawWifi(); break;
             case Screen::Portal: drawPortal(); break;
+            case Screen::Servers:
+                list("Servers", nullptr, wol::count() + 1, s_listIndex, serverItemText);
+                break;
+            case Screen::Server: drawServer(); break;
+            case Screen::Remote: drawRemote(); break;
             case Screen::Bluetooth: drawBluetooth(); break;
             case Screen::Log: drawLog(); break;
             case Screen::Info: drawInfo(); break;
@@ -699,10 +796,12 @@ static void openMenuItem(int i) {
         case 2: s_listIndex = 0; s_screen = Screen::PinMenu; break;
         case 3: s_screen = Screen::Wifi; break;
         case 4: s_portalSel = 0; s_screen = Screen::Portal; break;
-        case 5: s_screen = Screen::Bluetooth; break;
-        case 6: s_listIndex = 0; s_screen = Screen::Log; break;
-        case 7: s_screen = Screen::Info; break;
-        case 8: s_screen = Screen::ConfirmReset; break;
+        case 5: s_listIndex = 0; s_screen = Screen::Servers; break;
+        case 6: s_actionSel = 0; s_screen = Screen::Remote; break;
+        case 7: s_screen = Screen::Bluetooth; break;
+        case 8: s_listIndex = 0; s_screen = Screen::Log; break;
+        case 9: s_screen = Screen::Info; break;
+        case 10: s_screen = Screen::ConfirmReset; break;
         default: s_screen = Screen::Home; break;
     }
 }
@@ -831,6 +930,56 @@ static void handleKey(Key k) {
                     portal::setEnabled(!portal::enabled());
                     toast(portal::enabled() ? "Auto-login ON" : "Auto-login off");
                 }
+            }
+            break;
+        case Screen::Servers: {
+            int n = wol::count() + 1;
+            if (k == Key::Up) s_listIndex = (s_listIndex + n - 1) % n;
+            else if (k == Key::Down) s_listIndex = (s_listIndex + 1) % n;
+            else if (k == Key::OkLong || k == Key::Left) s_screen = Screen::Menu;
+            else if (k == Key::Ok || k == Key::Right) {
+                if (s_listIndex < wol::count()) { s_serverIndex = s_listIndex; s_actionSel = 0; s_screen = Screen::Server; }
+                else {
+                    wol::setEnabled(!wol::enabled());
+                    logEvent("WoL %s", wol::enabled() ? "on" : "off");
+                    toast(wol::enabled() ? "Wake-on-LAN on" : "Wake-on-LAN off");
+                }
+            }
+            break;
+        }
+        case Screen::Server:
+            if (k == Key::Up) s_actionSel = (s_actionSel + 3) % 4;
+            else if (k == Key::Down || k == Key::Right) s_actionSel = (s_actionSel + 1) % 4;
+            else if (k == Key::OkLong || k == Key::Left) s_screen = Screen::Servers;
+            else if (k == Key::Ok) {
+                const wol::Host* h = wol::host(s_serverIndex);
+                if (!h || s_actionSel == 3) { s_screen = Screen::Servers; break; }
+                if (s_actionSel == 0) toast(wol::wake(s_serverIndex, "device") ? "Waking..." : "WoL is off");
+                else if (s_actionSel == 1) {
+                    if (!h->ip[0]) { toast("No IP set"); break; }
+                    toast("Checking...");
+                    draw();
+                    toast(wol::check(s_serverIndex) ? "Up" : "Down");
+                } else {
+                    wol::setAutoWake(s_serverIndex, !h->autoWake);
+                    toast(h->autoWake ? "Auto-wake on" : "Auto-wake off");
+                }
+            }
+            break;
+        case Screen::Remote:
+            if (k == Key::Up) s_actionSel = (s_actionSel + 3) % 4;
+            else if (k == Key::Down || k == Key::Right) s_actionSel = (s_actionSel + 1) % 4;
+            else if (k == Key::OkLong || k == Key::Left) s_screen = Screen::Menu;
+            else if (k == Key::Ok) {
+                if (s_actionSel == 0) telegram::setNotifyLevel((telegram::notifyLevel() + 1) % 3);
+                else if (s_actionSel == 1) {
+                    // Only here, on the device: Telegram can't turn this on.
+                    telegram::setRemoteCodes(!telegram::remoteCodes());
+                    logEvent("TG codes %s", telegram::remoteCodes() ? "allowed" : "off");
+                } else if (s_actionSel == 2) {
+                    settings::setWebPage(!settings::webPage());
+                    logEvent("Web page %s", settings::webPage() ? "on" : "off");
+                } else s_screen = Screen::Menu;
             }
             break;
         case Screen::Bluetooth:

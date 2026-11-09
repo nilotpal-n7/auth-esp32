@@ -13,6 +13,7 @@ static bool     s_autoApprove = false;
 static char     s_tz[48] = DEFAULT_TZ;
 static bool     s_portalAuto = true;
 static bool     s_keyboard = true;
+static bool     s_web = true;
 
 // PIN record: salt(16) || SHA256(salt || pin)(32)
 static uint8_t  s_pinRecord[48];
@@ -36,6 +37,7 @@ bool init() {
     s_autoApprove = s_prefs.getBool("auto", false);
     s_portalAuto  = s_prefs.getBool("portal", true);
     s_keyboard    = s_prefs.getBool("kbd", true);
+    s_web         = s_prefs.getBool("web", true);
     if (s_prefs.isKey("tz")) s_prefs.getString("tz", s_tz, sizeof(s_tz));
     if (s_tz[0] == '\0') strlcpy(s_tz, DEFAULT_TZ, sizeof(s_tz));
     s_pinSet      = s_prefs.isKey("pin") &&
@@ -58,6 +60,11 @@ void setPortalAuto(bool on) {
 }
 
 bool keyboard() { return s_keyboard; }
+bool webPage() { return s_web; }
+void setWebPage(bool on) {
+    s_web = on;
+    s_prefs.putBool("web", on);
+}
 void setKeyboard(bool on) {
     s_keyboard = on;
     s_prefs.putBool("kbd", on);

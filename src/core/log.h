@@ -21,6 +21,10 @@ void logEvent(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 
 int         logCount();
 const char* logLine(int index);   // 0 = oldest
+// Every event gets a sequence number; logTotal() is the next one. Lets other
+// modules (Telegram notifications) pick up new events without a callback.
+uint32_t    logTotal();
+const char* logLineBySeq(uint32_t seq);   // "" if no longer in the ring
 
 void logInit();      // after NVS init: restore the previous boot's events
 void logLoop();      // saves to NVS once changes have settled
@@ -30,5 +34,8 @@ void logClear();
 // Raw console output (no tag), serialised with log output.
 void consolef(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 void consoleWrite(const char* s);
+// While set, console output (consolef / consoleWrite) is also appended to
+// `out` (up to ~3 KB): runs console commands for Telegram. nullptr stops it.
+void consoleCapture(String* out);
 
 void logHex(const char* tag, const char* label, const uint8_t* data, size_t len);

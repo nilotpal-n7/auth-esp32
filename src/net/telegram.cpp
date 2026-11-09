@@ -1,14 +1,20 @@
 #include "net/telegram.h"
 #include "config.h"
+#include "cli/cli.h"
+#include "core/approval.h"
 #include "core/log.h"
+#include "core/settings.h"
+#include "crypto/crypto.h"
 #include "fido/ctap2.h"
 #include "net/network.h"
 #include "net/portal.h"
 #include "net/telegram_ca.h"
 #include "net/wol.h"
+#include "totp/totp.h"
 #include "transport/hybrid.h"
 
 #include <ArduinoJson.h>
+#include <Preferences.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <mbedtls/x509_crt.h>
@@ -16,17 +22,19 @@
 namespace telegram {
 
 #define MAX_CHATS       4
-#define OUTBOX          3
-#define MSG_MAX         320
-#define RESP_MAX        2048                    // RAM is tight next to TLS; longer replies are skipped
+#define OUTBOX          6                       // queued requests (texts live on the heap)
+#define RESP_MAX        3072                    // RAM is tight next to TLS; longer replies are skipped
 #define POLL_STALL_MS   ((TG_LONG_POLL_SECS + 15) * 1000UL)
 #define SEND_STALL_MS   15000UL
 
 enum class St : uint8_t { Off, Idle, Polling, Sending };
+enum class Out : uint8_t { Message, Answer, Commands };
 
 struct Outgoing {
+    Out       type;
     long long chat;
-    char      text[MSG_MAX];
+    String    text;      // message text / setMyCommands body
+    String    extra;     // reply_markup JSON / callback query id
 };
 
 static St               s_state = St::Off;
@@ -40,6 +48,7 @@ static uint32_t         s_backoffS = 0;
 static uint32_t         s_reqMs = 0;
 static char             s_err[64] = "";
 static long long        s_lastIgnored = 0;
+static bool             s_commandsSet = false;   // setMyCommands sent this boot
 
 static Outgoing         s_out[OUTBOX];
 static int              s_outHead = 0, s_outCount = 0;
@@ -75,21 +84,6 @@ static bool allowed(long long chat) {
     return false;
 }
 
-static void enqueue(long long chat, const char* text) {
-    if (s_outCount == OUTBOX) {             // drop the oldest
-        s_outHead = (s_outHead + 1) % OUTBOX;
-        s_outCount--;
-    }
-    Outgoing& o = s_out[(s_outHead + s_outCount) % OUTBOX];
-    o.chat = chat;
-    strlcpy(o.text, text, sizeof(o.text));
-    s_outCount++;
-}
-
-void notify(const char* text) {
-    for (int i = 0; i < s_chatCount; i++) enqueue(s_chats[i], text);
-}
-
 static void hangUp() {
     if (s_connected) s_tls.stop();
     s_connected = false;
@@ -111,6 +105,556 @@ static void backOff(uint32_t fixedSecs = 0) {
     s_nextTryMs = millis() + (fixedSecs ? fixedSecs : s_backoffS) * 1000UL;
 }
 
+// --- Replies, buttons ---------------------------------------------------------------
+
+static bool s_sim = false;                       // replies go to the console (tg sim)
+
+static void push(Out type, long long chat, const String& text, const String& extra) {
+    if (s_outCount == OUTBOX) {                  // drop the oldest
+        s_out[s_outHead].text = String();
+        s_out[s_outHead].extra = String();
+        s_outHead = (s_outHead + 1) % OUTBOX;
+        s_outCount--;
+    }
+    Outgoing& o = s_out[(s_outHead + s_outCount) % OUTBOX];
+    o.type = type;
+    o.chat = chat;
+    o.text = text;
+    o.extra = extra;
+    s_outCount++;
+}
+
+static void reply(long long chat, String text, const String& markup = String()) {
+    if (text.length() > 3800) { text.remove(3800); text += "\n…"; }
+    if (s_sim) {
+        consoleWrite("[bot] ");
+        consoleWrite(text.c_str());
+        consoleWrite("\n");
+        if (markup.length()) { consoleWrite("[buttons] "); consoleWrite(markup.c_str()); consoleWrite("\n"); }
+        return;
+    }
+    push(Out::Message, chat, text, markup);
+}
+
+void notify(const char* text) {
+    for (int i = 0; i < s_chatCount; i++) push(Out::Message, s_chats[i], text, String());
+}
+
+// Inline keyboard: two buttons per row; a button sends its command back.
+struct Buttons {
+    JsonDocument doc;
+    JsonArray rows;
+    JsonArray row;
+    int inRow = 0;
+    Buttons() { rows = doc["inline_keyboard"].to<JsonArray>(); }
+    void add(const String& label, const String& command, int perRow = 2) {
+        if (row.isNull() || inRow >= perRow) { row = rows.add<JsonArray>(); inRow = 0; }
+        JsonObject b = row.add<JsonObject>();
+        b["text"] = label;
+        b["callback_data"] = command.substring(0, 64);
+        inRow++;
+    }
+    void newRow() { inRow = 99; }
+    String json() { String s; serializeJson(doc, s); return s; }
+};
+
+// --- Settings kept by the bot ------------------------------------------------------------
+
+static Preferences s_prefs;
+static int  s_notifyLevel = 1;
+static bool s_remoteCodes = false;
+
+int  notifyLevel() { return s_notifyLevel; }
+const char* notifyLevelName(int l) { return l <= 0 ? "off" : l == 1 ? "important" : "all"; }
+void setNotifyLevel(int l) {
+    s_notifyLevel = l < 0 ? 0 : l > 2 ? 2 : l;
+    s_prefs.putInt("notify", s_notifyLevel);
+}
+bool remoteCodes() { return s_remoteCodes; }
+void setRemoteCodes(bool on) {
+    s_remoteCodes = on;
+    s_prefs.putBool("codes", on);
+}
+
+// --- Remote commands that need OK on the device ----------------------------------------
+
+static struct {
+    bool      active;
+    bool      sim;
+    long long chat;
+    String    line;
+} s_remote;
+
+static void runAndReply(long long chat, const String& line) {
+    String out;
+    cli::run(line.c_str(), &out);
+    out.trim();
+    reply(chat, "$ " + line + "\n" + (out.length() ? out : String("(done, no output)")));
+}
+
+static void onRemoteApproval(bool approved, void*) {
+    bool prev = s_sim;
+    s_sim = s_remote.sim;
+    if (approved) runAndReply(s_remote.chat, s_remote.line);
+    else reply(s_remote.chat, "❌ Not approved on the AuthKey: " + s_remote.line);
+    s_sim = prev;
+    s_remote.active = false;
+    s_remote.line = String();
+}
+
+// Runs a console line now, or after OK on the device if it is sensitive.
+static void runConsole(long long chat, const String& line) {
+    if (!cli::sensitive(line.c_str())) { runAndReply(chat, line); return; }
+    if (s_remote.active ||
+        !approval::ask("REMOTE COMMAND?", line.c_str(), "from Telegram", false, onRemoteApproval, nullptr)) {
+        reply(chat, "The AuthKey is waiting for another confirmation; try again in a moment.");
+        return;
+    }
+    s_remote.active = true;
+    s_remote.sim = s_sim;
+    s_remote.chat = chat;
+    s_remote.line = line;
+    reply(chat, "🔐 \"" + line + "\" needs OK on the AuthKey (30 s).");
+}
+
+// --- Wake-on-LAN helpers -------------------------------------------------------------------
+
+static String hostLine(int i) {
+    const wol::Host* h = wol::host(i);
+    int st = wol::lastState(i);
+    String s = wol::waking(i) ? "⏳ " : st > 0 ? "🟢 " : st == 0 ? "🔴 " : "⚪ ";
+    s += h->name;
+    s += h->ip[0] ? String(" (") + h->ip + ")" : String(" (no IP)");
+    uint32_t age = wol::lastCheckAgeS(i);
+    if (wol::waking(i)) s += " waking";
+    else if (age != UINT32_MAX) s += String(", checked ") + (age < 120 ? String(age) + " s" : String(age / 60) + " min") + " ago";
+    if (h->autoWake) s += String(", auto-wake ") + h->autoMin + " min";
+    return s;
+}
+
+static int hostArg(long long chat, const char* arg) {
+    int i = wol::find(arg);
+    if (i < 0) reply(chat, String("No machine \"") + arg + "\". /hosts lists them.");
+    return i;
+}
+
+// /status for every machine runs one check per loop pass (each may block ~3 s).
+static struct {
+    bool      active;
+    bool      sim;
+    long long chat;
+    int       next;
+    String    text;
+} s_job;
+
+static void stepStatusJob() {
+    if (!s_job.active || ctap::busy()) return;
+    int i = s_job.next++;
+    if (i < wol::count()) {
+        const wol::Host* h = wol::host(i);
+        uint16_t port;
+        uint32_t ms = 0;
+        if (!h->ip[0]) s_job.text += String("⚪ ") + h->name + ": no IP set\n";
+        else if (wol::check(i, &port, &ms)) s_job.text += String("🟢 up – ") + h->name + " (" + h->ip + ", port " + port + ", " + ms + " ms)\n";
+        else s_job.text += String("🔴 down – ") + h->name + " (" + h->ip + ")" + (wol::waking(i) ? ", waking" : "") + "\n";
+        return;
+    }
+    bool prev = s_sim;
+    s_sim = s_job.sim;
+    if (!wol::enabled()) s_job.text += "(wake-on-LAN is off: /wol on)";
+    reply(s_job.chat, s_job.text);
+    s_sim = prev;
+    s_job.active = false;
+    s_job.text = String();
+}
+
+// --- Commands --------------------------------------------------------------------------------
+
+typedef void (*Handler)(long long chat, char* arg);
+struct Command {
+    const char* name;
+    const char* args;
+    const char* help;
+    Handler     fn;
+};
+extern const Command COMMANDS[];
+extern const int COMMAND_COUNT;
+
+static void cmdHelp(long long chat, char*) {
+    String s = "AuthKey remote control\n";
+    for (int i = 0; i < COMMAND_COUNT; i++) {
+        s += String("/") + COMMANDS[i].name + (COMMANDS[i].args[0] ? String(" ") + COMMANDS[i].args : String()) +
+             " – " + COMMANDS[i].help + "\n";
+    }
+    s += "\nRisky actions (auto-approve on, deleting keys, raw CTAP, …) wait for OK on the AuthKey.";
+    reply(chat, s);
+}
+
+static void cmdMenu(long long chat, char*) {
+    Buttons b;
+    b.add("📊 Status (all)", "/status");
+    b.add("🖥 Machines", "/hosts");
+    for (int i = 0; i < wol::count(); i++) b.add(String("⏰ Wake ") + wol::host(i)->name, String("/wake ") + wol::host(i)->name);
+    b.newRow();
+    b.add("ℹ️ Device info", "/info");
+    b.add("📜 Event log", "/log");
+    b.add("🌐 Campus login", "/portal login");
+    b.add("🌐 Campus status", "/portal");
+    b.add("⚙️ Switches", "/set");
+    b.add(String("🔔 Notify: ") + notifyLevelName(s_notifyLevel), "/notify");
+    reply(chat, "What do you want to do?", b.json());
+}
+
+static void cmdHosts(long long chat, char*) {
+    if (!wol::count()) { reply(chat, "No machines yet. /addhost <name> <mac> [ip] [ports]"); return; }
+    String s = String("Machines (wake-on-LAN ") + (wol::enabled() ? "on" : "OFF") + "):\n";
+    Buttons b;
+    for (int i = 0; i < wol::count(); i++) {
+        s += String(i + 1) + ". " + hostLine(i) + "\n";
+        b.add(String("⏰ ") + wol::host(i)->name, String("/wake ") + wol::host(i)->name);
+        b.add(String("🔎 ") + wol::host(i)->name, String("/status ") + wol::host(i)->name);
+    }
+    reply(chat, s, b.json());
+}
+
+static void cmdWake(long long chat, char* arg) {
+    if (!wol::enabled()) { reply(chat, "Wake-on-LAN is off. /wol on"); return; }
+    if (!wol::count()) { reply(chat, "No machines yet. /addhost <name> <mac> [ip] [ports]"); return; }
+    if (!*arg && wol::count() > 1) {
+        Buttons b;
+        for (int i = 0; i < wol::count(); i++) b.add(String("⏰ ") + wol::host(i)->name, String("/wake ") + wol::host(i)->name);
+        b.add("⏰ All", "/wake all");
+        reply(chat, "Which machine?", b.json());
+        return;
+    }
+    if (!strcasecmp(arg, "all")) {
+        for (int i = 0; i < wol::count(); i++) wol::wake(i, "/wake all");
+        reply(chat, String("Waking ") + wol::count() + " machine(s)…");
+        return;
+    }
+    int i = *arg ? hostArg(chat, arg) : 0;
+    if (i < 0) return;
+    wol::wake(i, "/wake");
+    if (s_sim) reply(chat, String("Waking ") + wol::host(i)->name + " (reports follow as notifications).");
+}
+
+static void cmdStatus(long long chat, char* arg) {
+    if (*arg && strcasecmp(arg, "all")) {
+        int i = hostArg(chat, arg);
+        if (i < 0) return;
+        const wol::Host* h = wol::host(i);
+        uint16_t port;
+        uint32_t ms = 0;
+        if (!h->ip[0]) reply(chat, String("⚪ ") + h->name + " has no IP set: /sethost " + h->name + " ip <address>");
+        else if (wol::check(i, &port, &ms)) reply(chat, String("🟢 up – ") + h->name + " (" + h->ip + ") answers on port " + port + " (" + ms + " ms)");
+        else reply(chat, String("🔴 down – ") + h->name + " (" + h->ip + "): no answer on " + h->ports[0] + (h->ports[1] ? String("/") + h->ports[1] : String()) + (wol::waking(i) ? " (wake in progress)" : ""));
+        return;
+    }
+    if (!wol::count()) { reply(chat, "No machines yet. /addhost <name> <mac> [ip] [ports]"); return; }
+    if (s_job.active) { reply(chat, "Already checking; the answer is coming."); return; }
+    s_job.active = true;
+    s_job.sim = s_sim;
+    s_job.chat = chat;
+    s_job.next = 0;
+    s_job.text = String();
+}
+
+static void cmdAutowake(long long chat, char* arg) {
+    char* who = strtok(arg, " ");
+    char* onoff = strtok(nullptr, " ");
+    char* mins = strtok(nullptr, " ");
+    if (!who || !onoff || (strcasecmp(onoff, "on") && strcasecmp(onoff, "off"))) {
+        String s = "Auto-wake (wake a machine that has been unreachable for N minutes):\n";
+        for (int i = 0; i < wol::count(); i++) {
+            const wol::Host* h = wol::host(i);
+            s += String(h->name) + ": " + (h->autoWake ? String("on, ") + h->autoMin + " min" : String("off")) + "\n";
+        }
+        reply(chat, s + "Change: /autowake <machine|all> on|off [minutes]");
+        return;
+    }
+    bool on = !strcasecmp(onoff, "on");
+    int m = mins ? atoi(mins) : 0;
+    if (!strcasecmp(who, "all")) {
+        for (int i = 0; i < wol::count(); i++) wol::setAutoWake(i, on, m);
+    } else {
+        int i = hostArg(chat, who);
+        if (i < 0) return;
+        wol::setAutoWake(i, on, m);
+    }
+    logEvent("Auto-wake %s %s", who, on ? "on" : "off");
+    char* none = (char*)"";
+    cmdAutowake(chat, none);
+}
+
+static void cmdAddhost(long long chat, char* arg) {
+    char* name = strtok(arg, " ");
+    char* mac = strtok(nullptr, " ");
+    char* ip = strtok(nullptr, " ");
+    char* ports = strtok(nullptr, " ");
+    char* bcast = strtok(nullptr, " ");
+    wol::Host h;
+    char err[64];
+    if (!name || !mac) { reply(chat, "Usage: /addhost <name> <mac> [ip|-] [ports e.g. 8006,22] [broadcast]"); return; }
+    if (!wol::makeHost(name, mac, ip, ports, bcast, &h, err, sizeof(err))) { reply(chat, String("Not saved: ") + err); return; }
+    int i = wol::put(h, err, sizeof(err));
+    if (i < 0) { reply(chat, String("Not saved: ") + err); return; }
+    logEvent("WoL host %s saved", h.name);
+    reply(chat, String("Saved: ") + hostLine(i) + "\n/wake " + h.name + " · /status " + h.name);
+}
+
+static void cmdDelhost(long long chat, char* arg) {
+    int i = hostArg(chat, arg);
+    if (i < 0) return;
+    String name = wol::host(i)->name;
+    wol::remove(i);
+    logEvent("WoL host %s removed", name.c_str());
+    reply(chat, "Removed " + name + ".");
+}
+
+static void cmdSethost(long long chat, char* arg) {
+    char* who = strtok(arg, " ");
+    char* field = strtok(nullptr, " ");
+    char* value = strtok(nullptr, " ");
+    if (!who || !field || !value) { reply(chat, "Usage: /sethost <machine> ip|mac|ports|broadcast|name <value>"); return; }
+    int i = hostArg(chat, who);
+    if (i < 0) return;
+    wol::Host h = *wol::host(i);
+    char mac[18], ports[16], err[64];
+    wol::formatMac(h.mac, mac, sizeof(mac));
+    snprintf(ports, sizeof(ports), "%u,%u", h.ports[0], h.ports[1]);
+    String name = h.name, ip = h.ip, bc = h.broadcast, m = mac, p = ports;
+    if (!strcasecmp(field, "ip")) ip = value;
+    else if (!strcasecmp(field, "mac")) m = value;
+    else if (!strcasecmp(field, "ports")) p = value;
+    else if (!strcasecmp(field, "broadcast")) bc = value;
+    else if (!strcasecmp(field, "name")) name = value;
+    else { reply(chat, "Field: ip, mac, ports, broadcast or name"); return; }
+    wol::Host n;
+    if (!wol::makeHost(name.c_str(), m.c_str(), ip.c_str(), p.c_str(), bc.c_str(), &n, err, sizeof(err))) {
+        reply(chat, String("Not changed: ") + err);
+        return;
+    }
+    n.autoWake = h.autoWake;
+    n.autoMin = h.autoMin;
+    if (strcasecmp(n.name, h.name)) wol::remove(i);          // renamed: replace the entry
+    int j = wol::put(n, err, sizeof(err));
+    if (j < 0) { reply(chat, String("Not changed: ") + err); return; }
+    reply(chat, "Updated: " + hostLine(j));
+}
+
+static void cmdWol(long long chat, char* arg) {
+    if (!strcasecmp(arg, "on") || !strcasecmp(arg, "off")) {
+        wol::setEnabled(!strcasecmp(arg, "on"));
+        logEvent("WoL %s", wol::enabled() ? "on" : "off");
+    }
+    Buttons b;
+    b.add(wol::enabled() ? "Turn off" : "Turn on", wol::enabled() ? "/wol off" : "/wol on");
+    reply(chat, String("Wake-on-LAN is ") + (wol::enabled() ? "on" : "off") + " for all machines.", b.json());
+}
+
+static void cmdInfo(long long chat, char*) { runAndReply(chat, "status"); }
+
+static void cmdLog(long long chat, char* arg) {
+    int n = *arg ? atoi(arg) : 15;
+    if (n <= 0 || n > LOG_LINES) n = LOG_LINES;
+    int total = logCount();
+    String s = "Event log (newest last):\n";
+    for (int i = total > n ? total - n : 0; i < total; i++) { s += logLine(i); s += "\n"; }
+    reply(chat, total ? s : String("Event log is empty."));
+}
+
+static void cmdPortal(long long chat, char* arg) {
+    String line = "portal";
+    if (*arg) line += String(" ") + arg;
+    runConsole(chat, line);
+}
+
+static void cmdSet(long long chat, char* arg) {
+    char* name = strtok(arg, " ");
+    char* value = strtok(nullptr, " ");
+    if (name && value) {
+        bool on = !strcasecmp(value, "on");
+        if (!on && strcasecmp(value, "off")) { reply(chat, "Use on or off."); return; }
+        if (!strcasecmp(name, "autologin")) portal::setEnabled(on);
+        else if (!strcasecmp(name, "wol")) wol::setEnabled(on);
+        else if (!strcasecmp(name, "web")) settings::setWebPage(on);
+        else if (!strcasecmp(name, "keyboard")) {
+            settings::setKeyboard(on);
+            reply(chat, "The keyboard change applies after /reboot.");
+        } else if (!strcasecmp(name, "autoapprove")) {
+            if (on) { runConsole(chat, "auto on"); return; }   // weakens protection: OK on the device
+            settings::setAutoApprove(false);
+        } else { reply(chat, "Unknown switch. /set lists them."); return; }
+        logEvent("Remote: %s %s", name, on ? "on" : "off");
+    }
+    Buttons b;
+    struct { const char* key; const char* label; bool on; } sw[] = {
+        {"autologin", "Campus auto-login", portal::enabled()},
+        {"wol", "Wake-on-LAN", wol::enabled()},
+        {"autoapprove", "Auto-approve sign-ins", settings::autoApprove()},
+        {"keyboard", "Bluetooth keyboard", settings::keyboard()},
+        {"web", "Web page", settings::webPage()},
+    };
+    String s = "Switches (tap to flip):\n";
+    for (auto& x : sw) {
+        s += String(x.on ? "✅ " : "⬜ ") + x.label + " (" + x.key + ")\n";
+        b.add(String(x.on ? "✅ " : "⬜ ") + x.label, String("/set ") + x.key + (x.on ? " off" : " on"), 1);
+    }
+    s += String("🔔 Notifications: ") + notifyLevelName(s_notifyLevel) + " (/notify)\n";
+    s += String("🔢 TOTP codes over Telegram: ") + (s_remoteCodes ? "allowed" : "off") + " (only changeable on the device)";
+    reply(chat, s, b.json());
+}
+
+static void cmdNotify(long long chat, char* arg) {
+    if (!strcasecmp(arg, "off")) setNotifyLevel(0);
+    else if (!strcasecmp(arg, "important")) setNotifyLevel(1);
+    else if (!strcasecmp(arg, "all")) setNotifyLevel(2);
+    Buttons b;
+    b.add("Off", "/notify off", 3);
+    b.add("Important", "/notify important", 3);
+    b.add("All events", "/notify all", 3);
+    reply(chat, String("Notifications: ") + notifyLevelName(s_notifyLevel) +
+                ".\nImportant = boots, campus drops, sign-ins, PIN / pairing / backup changes.", b.json());
+}
+
+static uint32_t s_rebootAt = 0;
+static void cmdReboot(long long chat, char*) {
+    reply(chat, "Rebooting the AuthKey…");
+    s_rebootAt = millis() | 1;
+}
+
+static void cmdHybrid(long long chat, char* arg) {
+    if (strncasecmp(arg, "FIDO:/", 6)) { reply(chat, "Send the passkey QR's text: /hybrid FIDO:/…"); return; }
+    runConsole(chat, String("hybrid ") + arg);
+}
+
+static void cmdTotp(long long chat, char*) {
+    String s = "Authenticator accounts:\n";
+    TotpAccount a;
+    for (int i = 0; i < totp::count(); i++) if (totp::get(i, &a)) s += String(i + 1) + ". " + a.name + "\n";
+    crypto::wipe(&a, sizeof(a));
+    if (!totp::count()) s = "No authenticator accounts.";
+    else s += s_remoteCodes ? "/code <number or name>" : "(codes stay on the device; allow in Menu → Remote)";
+    reply(chat, s);
+}
+
+static void cmdCode(long long chat, char* arg) {
+    if (!s_remoteCodes) {
+        reply(chat, "Sending TOTP codes over Telegram is off. It can only be allowed on the AuthKey "
+                    "(Menu → Remote), because whoever reads this chat would get your second factor.");
+        return;
+    }
+    time_t now = network::now();
+    if (!now) { reply(chat, "The AuthKey's clock isn't set yet."); return; }
+    TotpAccount a;
+    int found = -1;
+    for (int i = 0; i < totp::count() && found < 0; i++) {
+        if (!totp::get(i, &a)) continue;
+        if (atoi(arg) == i + 1 || !strcasecmp(a.name, arg)) found = i;
+    }
+    if (found < 0) { crypto::wipe(&a, sizeof(a)); reply(chat, "No such account. /totp lists them."); return; }
+    char code[16];
+    totp::format(a, totp::generate(a, now), code, sizeof(code));
+    String s = String(a.name) + ": " + code + " (" + totp::secondsRemaining(a, now) + " s left)";
+    crypto::wipe(&a, sizeof(a));
+    logEvent("TOTP code sent remotely");
+    reply(chat, s);
+    crypto::wipe(code, sizeof(code));
+}
+
+static void cmdCmd(long long chat, char* arg) {
+    if (!*arg) { reply(chat, "Usage: /cmd <console command>, e.g. /cmd status, /cmd wifi list, /cmd help"); return; }
+    runConsole(chat, arg);
+}
+
+const Command COMMANDS[] = {
+    {"menu",     "",                                   "buttons for everything", cmdMenu},
+    {"wake",     "[machine|all]",                      "wake-on-LAN, then report when it's up", cmdWake},
+    {"status",   "[machine|all]",                      "🟢 up / 🔴 down", cmdStatus},
+    {"hosts",    "",                                   "machines and their last state", cmdHosts},
+    {"autowake", "<machine|all> on|off [min]",         "wake it when unreachable that long", cmdAutowake},
+    {"addhost",  "<name> <mac> [ip] [ports] [bcast]",  "add or replace a machine", cmdAddhost},
+    {"sethost",  "<machine> ip|mac|ports|broadcast|name <value>", "change a machine", cmdSethost},
+    {"delhost",  "<machine>",                          "remove a machine", cmdDelhost},
+    {"wol",      "[on|off]",                           "wake-on-LAN for all machines", cmdWol},
+    {"info",     "",                                   "AuthKey status (WiFi, campus, Bluetooth, RAM…)", cmdInfo},
+    {"log",      "[lines]",                            "event log", cmdLog},
+    {"portal",   "[login|logout|on|off]",              "campus internet login", cmdPortal},
+    {"set",      "[switch on|off]",                    "feature switches", cmdSet},
+    {"notify",   "[off|important|all]",                "event notifications", cmdNotify},
+    {"totp",     "",                                   "authenticator account names", cmdTotp},
+    {"code",     "<account>",                          "a TOTP code (only if allowed on the device)", cmdCode},
+    {"hybrid",   "<FIDO:/…>",                          "passkey sign-in from a QR's text (needs OK)", cmdHybrid},
+    {"cmd",      "<console command>",                  "run any console command", cmdCmd},
+    {"reboot",   "",                                   "restart the AuthKey", cmdReboot},
+    {"help",     "",                                   "this list", cmdHelp},
+};
+const int COMMAND_COUNT = sizeof(COMMANDS) / sizeof(COMMANDS[0]);
+
+static void dispatch(long long chat, const char* textIn) {
+    static char text[360];
+    strlcpy(text, textIn, sizeof(text));
+    if (text[0] != '/') { reply(chat, "Commands start with /. Try /menu or /help."); return; }
+    char* arg = strchr(text, ' ');
+    if (arg) { *arg++ = '\0'; while (*arg == ' ') arg++; }
+    else arg = text + strlen(text);
+    char* at = strchr(text, '@');               // "/wake@MyBot" in group chats
+    if (at) *at = '\0';
+    if (!strcasecmp(text, "/start")) { cmdMenu(chat, arg); return; }
+    for (int i = 0; i < COMMAND_COUNT; i++) {
+        if (!strcasecmp(text + 1, COMMANDS[i].name)) {
+            logf("TG", "/%s from %lld", COMMANDS[i].name, chat);
+            COMMANDS[i].fn(chat, arg);
+            return;
+        }
+    }
+    reply(chat, "Unknown command. /menu or /help.");
+}
+
+void simulate(const char* text) {
+    s_sim = true;
+    dispatch(s_chatCount ? s_chats[0] : 0, text);
+    s_sim = false;
+}
+
+// --- Event notifications --------------------------------------------------------------------
+
+static uint32_t s_seenSeq = 0;
+static uint32_t s_nextNotifyMs = 0;
+
+static bool startsWith(const char* s, const char* p) { return !strncmp(s, p, strlen(p)); }
+
+static bool forwardable(const char* msg, int level) {
+    // Already reported directly, or about the bot itself.
+    if (startsWith(msg, "TG ") || startsWith(msg, "WoL ") || strstr(msg, "after WoL") || startsWith(msg, "Remote:"))
+        return false;
+    if (level >= 2) return true;
+    static const char* const IMPORTANT[] = {
+        "Boot", "IITG", "PIN", "Device PIN", "Backup", "Passkey", "FIDO reset", "Paired PC", "PC pairing",
+        "Web access", "BLE paired", "BT keyboard", "Auto-approve", "Signed in", "Registered", "Denied",
+        "TOTP code sent",
+    };
+    for (const char* p : IMPORTANT) if (startsWith(msg, p)) return true;
+    return false;
+}
+
+static void forwardEvents() {
+    uint32_t total = logTotal();
+    if (s_seenSeq >= total || (int32_t)(millis() - s_nextNotifyMs) < 0) return;
+    String text;
+    for (uint32_t q = s_seenSeq; q < total; q++) {
+        const char* line = logLineBySeq(q);
+        const char* msg = strchr(line, ' ');
+        msg = msg ? msg + 1 : line;
+        if (*line && s_notifyLevel && forwardable(msg, s_notifyLevel)) { text += line; text += "\n"; }
+    }
+    s_seenSeq = total;
+    if (text.length()) {
+        notify(("🔔 " + text).c_str());
+        s_nextNotifyMs = millis() + 10000;    // batch bursts into one message
+    }
+}
+
 void init() {
     // TELEGRAM_CHAT_ID: one or more numeric IDs, comma-separated.
     const char* p = SECRET_TG_CHATS;
@@ -121,8 +665,12 @@ void init() {
         s_chats[s_chatCount++] = id;
         p = *end == ',' ? end + 1 : end;
     }
+    s_prefs.begin("tg", false);
+    s_notifyLevel = s_prefs.getInt("notify", 1);
+    s_remoteCodes = s_prefs.getBool("codes", false);
+    s_seenSeq = logTotal();      // notify about events from now on (incl. this boot's)
     if (!enabled()) {
-        logf("TG", "no TELEGRAM_BOT_TOKEN in .env: bot off");
+        logf("TG", "no TELEGRAM_BOT_TOKEN in .env: bot off (tg sim <command> still works)");
         return;
     }
     s_state = St::Idle;
@@ -130,83 +678,30 @@ void init() {
     if (finderMode())
         logf("TG", "no TELEGRAM_CHAT_ID yet: send your bot any message, its chat ID is logged here");
     else
-        logf("TG", "bot on, %d allowed chat(s)", s_chatCount);
+        logf("TG", "bot on, %d allowed chat(s), notifications %s", s_chatCount, notifyLevelName(s_notifyLevel));
 }
 
-// --- Commands ---------------------------------------------------------------------
-
-static const char HELP[] =
-    "AuthKey server control\n"
-    "/wake – wake " WOL_SERVER_NAME " (wake-on-LAN), then tell you when it is up\n"
-    "/status – 🟢 up or 🔴 down\n"
-    "/autowake on|off [minutes] – wake it when unreachable that long (default 10)\n"
-    "/setip <ip> – the server's address (DHCP can change it)\n"
-    "/help – this list";
-
-static void statusReply(long long chat) {
-    uint16_t port;
-    uint32_t ms = 0;
-    char msg[MSG_MAX], autoLine[48];
-    if (wol::autoWake()) snprintf(autoLine, sizeof(autoLine), "Auto-wake: on (%d min)", wol::autoWakeMinutes());
-    else strlcpy(autoLine, "Auto-wake: off", sizeof(autoLine));
-    if (wol::check(&port, &ms)) {
-        snprintf(msg, sizeof(msg), "🟢 up – %s (%s) answers on port %u (%lu ms)\n%s", WOL_SERVER_NAME,
-                 wol::serverIp(), port, (unsigned long)ms, autoLine);
-    } else {
-        snprintf(msg, sizeof(msg), "🔴 down – %s (%s): no answer on %d or %d%s\n%s", WOL_SERVER_NAME,
-                 wol::serverIp(), WOL_CHECK_PORT, WOL_CHECK_PORT_ALT,
-                 wol::waking() ? " (wake in progress)" : "", autoLine);
-    }
-    enqueue(chat, msg);
-}
-
-static void command(long long chat, const char* textIn) {
-    char text[96];
-    strlcpy(text, textIn, sizeof(text));
-    char* arg = strchr(text, ' ');
-    if (arg) { *arg++ = '\0'; while (*arg == ' ') arg++; }
-    char* at = strchr(text, '@');          // "/wake@MyBot" in group chats
-    if (at) *at = '\0';
-    char msg[MSG_MAX];
-    logf("TG", "command %s from chat %lld", text, chat);
-
-    if (!strcmp(text, "/wake")) {
-        wol::wake("/wake");                // reports itself once the packets are out
-    } else if (!strcmp(text, "/status")) {
-        statusReply(chat);
-    } else if (!strcmp(text, "/autowake")) {
-        if (arg && (!strncmp(arg, "on", 2) || !strncmp(arg, "off", 3))) {
-            bool on = !strncmp(arg, "on", 2);
-            int minutes = 0;
-            const char* num = strchr(arg, ' ');
-            if (num) minutes = atoi(num);
-            wol::setAutoWake(on, minutes);
-            logEvent("Auto-wake %s", on ? "ON" : "off");
-        }
-        if (wol::autoWake())
-            snprintf(msg, sizeof(msg), "Auto-wake is ON: if %s is unreachable for %d min, I send a magic packet and tell you.",
-                     WOL_SERVER_NAME, wol::autoWakeMinutes());
-        else
-            snprintf(msg, sizeof(msg), "Auto-wake is off. Turn on: /autowake on [minutes]");
-        enqueue(chat, msg);
-    } else if (!strcmp(text, "/setip")) {
-        if (arg && *arg) {
-            if (wol::setServerIp(arg)) snprintf(msg, sizeof(msg), "OK: %s is now %s (saved).", WOL_SERVER_NAME, wol::serverIp());
-            else snprintf(msg, sizeof(msg), "That isn't an IPv4 address. Example: /setip 172.16.114.175");
-        } else {
-            snprintf(msg, sizeof(msg), "%s is at %s. Change: /setip <ip>", WOL_SERVER_NAME, wol::serverIp());
-        }
-        enqueue(chat, msg);
-    } else if (!strcmp(text, "/help") || !strcmp(text, "/start")) {
-        enqueue(chat, HELP);
-    } else {
-        enqueue(chat, "Unknown command. /help lists them.");
-    }
-}
+// --- Updates ------------------------------------------------------------------------------
 
 static void handleUpdate(JsonObject u) {
     long long id = u["update_id"].as<long long>();
     if (id >= s_offset) s_offset = id + 1;
+
+    // Button press: answer it (stops the spinner), then run its command.
+    JsonObject cq = u["callback_query"];
+    if (!cq.isNull()) {
+        push(Out::Answer, 0, String(), String((const char*)(cq["id"] | "")));
+        long long chat = cq["message"]["chat"]["id"].as<long long>();
+        const char* data = cq["data"] | "";
+        if (!allowed(chat)) {
+            s_lastIgnored = chat;
+            logf("TG", "ignored button from chat %lld", chat);
+            return;
+        }
+        dispatch(chat, data);
+        return;
+    }
+
     JsonObject m = u["message"];
     if (m.isNull()) return;
     long long chat = m["chat"]["id"].as<long long>();
@@ -232,8 +727,7 @@ static void handleUpdate(JsonObject u) {
         logf("TG", "ignored %.20s from %lld: sent %lld s ago", text, chat, (long long)(now - sent));
         return;
     }
-    if (text[0] == '/') command(chat, text);
-    else enqueue(chat, "Commands only. /help lists them.");
+    dispatch(chat, text);
 }
 
 // --- HTTP -------------------------------------------------------------------------------
@@ -315,9 +809,10 @@ static bool connectTls() {
 }
 
 static void sendPoll() {
-    char req[256];
+    char req[300];
     snprintf(req, sizeof(req),
-             "GET /bot%s/getUpdates?offset=%lld&limit=1&timeout=%d&allowed_updates=%%5B%%22message%%22%%5D HTTP/1.1\r\n"
+             "GET /bot%s/getUpdates?offset=%lld&limit=1&timeout=%d"
+             "&allowed_updates=%%5B%%22message%%22,%%22callback_query%%22%%5D HTTP/1.1\r\n"
              "Host: " TG_HOST "\r\nConnection: keep-alive\r\n\r\n",
              SECRET_TG_TOKEN, s_offset, TG_LONG_POLL_SECS);
     s_tls.print(req);
@@ -327,24 +822,52 @@ static void sendPoll() {
     s_state = St::Polling;
 }
 
-static void sendMessage(const Outgoing& o) {
-    JsonDocument doc;
-    doc["chat_id"] = o.chat;
-    doc["text"] = o.text;
-    doc["disable_web_page_preview"] = true;
+static void sendRequest(const Outgoing& o) {
+    const char* method;
     String body;
-    serializeJson(doc, body);
-    char head[200];
+    if (o.type == Out::Answer) {
+        method = "answerCallbackQuery";
+        JsonDocument doc;
+        doc["callback_query_id"] = o.extra;
+        serializeJson(doc, body);
+    } else if (o.type == Out::Commands) {
+        method = "setMyCommands";
+        body = o.text;
+    } else {
+        method = "sendMessage";
+        JsonDocument doc;
+        doc["chat_id"] = o.chat;
+        doc["text"] = o.text;
+        doc["disable_web_page_preview"] = true;
+        if (o.extra.length()) doc["reply_markup"] = serialized(o.extra);
+        serializeJson(doc, body);
+    }
+    char head[220];
     snprintf(head, sizeof(head),
-             "POST /bot%s/sendMessage HTTP/1.1\r\nHost: " TG_HOST "\r\nConnection: keep-alive\r\n"
+             "POST /bot%s/%s HTTP/1.1\r\nHost: " TG_HOST "\r\nConnection: keep-alive\r\n"
              "Content-Type: application/json\r\nContent-Length: %u\r\n\r\n",
-             SECRET_TG_TOKEN, (unsigned)body.length());
+             SECRET_TG_TOKEN, method, (unsigned)body.length());
     s_tls.print(head);
     s_tls.print(body);
     memset(head, 0, sizeof(head));
     s_respLen = 0;
     s_reqMs = millis();
     s_state = St::Sending;
+}
+
+// The command list Telegram shows when you type "/".
+static void queueCommandList() {
+    JsonDocument doc;
+    JsonArray list = doc["commands"].to<JsonArray>();
+    for (int i = 0; i < COMMAND_COUNT; i++) {
+        JsonObject c = list.add<JsonObject>();
+        c["command"] = COMMANDS[i].name;
+        c["description"] = COMMANDS[i].help;
+    }
+    String body;
+    serializeJson(doc, body);
+    push(Out::Commands, 0, body, String());
+    s_commandsSet = true;
 }
 
 // When the buffer can't hold a reply (a huge message), skip that update so
@@ -380,6 +903,7 @@ static void handlePoll(int status, char* body, size_t len) {
     }
     s_backoffS = 0;
     s_err[0] = '\0';
+    if (!s_commandsSet && !finderMode()) queueCommandList();
     for (JsonObject u : doc["result"].as<JsonArray>()) handleUpdate(u);
 }
 
@@ -494,7 +1018,14 @@ bool ping(char* out, size_t cap) {
 }
 
 void loop() {
+    stepStatusJob();                        // local work, also without a token (tg sim)
     if (s_state == St::Off) return;
+    forwardEvents();
+    if (s_rebootAt && (!s_outCount || millis() - s_rebootAt > 15000)) {
+        logFlush();
+        delay(200);
+        ESP.restart();
+    }
     if (!network::connected()) { if (s_connected) hangUp(); return; }
     if (mustYield()) { if (s_connected) releaseTls(); return; }
 
@@ -517,7 +1048,7 @@ void loop() {
         if (status < 0) {
             uint32_t limit = s_state == St::Polling ? POLL_STALL_MS : SEND_STALL_MS;
             if (millis() - s_reqMs > limit) { setError("no reply from Telegram"); hangUp(); }
-            // A reply is waiting to go out: abandon the long poll (updates
+            // Something is waiting to go out: abandon the long poll (updates
             // stay queued at Telegram until confirmed by the next offset).
             else if (s_state == St::Polling && s_outCount && !s_respLen) hangUp();
             return;
@@ -525,8 +1056,10 @@ void loop() {
         if (s_state == St::Polling) {
             handlePoll(status, body, len);
         } else {
-            if (status != 200) setError("sendMessage HTTP %d", status);
-            s_outHead = (s_outHead + 1) % OUTBOX;   // sent (or rejected: don't retry forever)
+            if (status != 200) setError("%s HTTP %d", s_out[s_outHead].type == Out::Message ? "sendMessage" : "request", status);
+            s_out[s_outHead].text = String();       // sent (or rejected: don't retry forever)
+            s_out[s_outHead].extra = String();
+            s_outHead = (s_outHead + 1) % OUTBOX;
             s_outCount--;
         }
         s_respLen = 0;
@@ -535,13 +1068,13 @@ void loop() {
         return;
     }
 
-    // Idle: connect if needed, then send a queued message or start a poll.
+    // Idle: connect if needed, then send what is queued or start a poll.
     if ((int32_t)(millis() - s_nextTryMs) < 0) return;
     if (!s_connected) {
         if (ctap::busy()) return;            // the handshake would stall a passkey prompt
         if (!connectTls()) { backOff(); return; }
     }
-    if (s_outCount) sendMessage(s_out[s_outHead]);
+    if (s_outCount) sendRequest(s_out[s_outHead]);
     else sendPoll();
 }
 

@@ -27,7 +27,7 @@ namespace cli {
 static char   s_line[2 * FIDO_MAX_MSG + 64];
 static size_t s_len = 0;
 
-#define MAX_ARGS 6
+#define MAX_ARGS 7
 
 // Split into arguments; "double quotes" group words. Modifies `line`.
 static int tokenize(char* line, char** argv) {
@@ -64,8 +64,9 @@ static void help() {
 #endif
         "  wifi list | wifi add <ssid> <password> | wifi del <n>\n"
         "  portal status|on|off|login|logout   IITG captive-portal auto-login\n"
-        "  wol | wol wake | wol check | wol ip <ip> | wol auto on|off [min]   wake the server\n"
-        "  tg | tg ping                Telegram bot status | test the TLS connection\n"
+        "  wol [list] | wol add <name> <mac> [ip|-] [ports] [broadcast] | wol del <host>\n"
+        "  wol wake|check <host> | wol auto <host> on|off [min] | wol on|off | wol reset   wake-on-LAN\n"
+        "  tg | tg ping | tg sim <text>   bot status | test TLS | run a bot command here\n"
         "  wifi connect | wifi reset   reconnect | restore the .env list\n"
         "  time | time set <unix>      show / set UTC clock\n"
         "  tz <POSIX TZ>               clock timezone, e.g. IST-5:30, CET-1CEST,M3.5.0,M10.5.0/3\n"
@@ -110,9 +111,7 @@ static void status() {
         consolef("  Portal:    %s (%s), auto %s, %s\n", portal::stateStr(), portal::user(),
                  portal::enabled() ? "on" : "off", portal::lastResult());
     }
-    consolef("  Server:    %s %s, %s, auto-wake %s\n", WOL_SERVER_NAME, wol::serverIp(),
-             wol::lastState() < 0 ? "not checked" : wol::lastState() ? "up" : "down",
-             wol::autoWake() ? "on" : "off");
+    consolef("  Servers:   %d, wake-on-LAN %s\n", wol::count(), wol::enabled() ? "on" : "off");
     consolef("  Telegram:  %s%s%s\n", telegram::stateStr(), telegram::lastError()[0] ? ", " : "",
              telegram::lastError());
     consolef("  Heap:      %u free, largest block %u\n", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
@@ -209,31 +208,96 @@ static void cmdPortal(int argc, char** argv) {
 }
 
 // --- Server wake-on-LAN ---------------------------------------------------------
+static const char* stateWord(int i) {
+    int st = wol::lastState(i);
+    return wol::waking(i) ? "waking" : st < 0 ? "?" : st ? "up" : "down";
+}
+
+static void listHosts() {
+    char mac[18];
+    for (int i = 0; i < wol::count(); i++) {
+        const wol::Host* h = wol::host(i);
+        wol::formatMac(h->mac, mac, sizeof(mac));
+        consolef("  %d: %-10s %s  %-15s ports %u,%u  %-6s auto-wake %s%s\n", i + 1, h->name, mac,
+                 h->ip[0] ? h->ip : "(no IP)", h->ports[0], h->ports[1], stateWord(i),
+                 h->autoWake ? "on " : "off", h->autoWake ? (String("(") + h->autoMin + " min)").c_str() : "");
+    }
+    if (!wol::count()) consoleWrite("  (no machines: wol add <name> <mac> [ip] [ports] [broadcast])\n");
+}
+
+// wol | wol list | wol add <name> <mac> [ip|-] [ports] [broadcast] | wol del <host>
+// wol wake <host> | wol check <host> | wol auto <host> on|off [min] | wol on|off | wol reset
 static void cmdWol(int argc, char** argv) {
-    const char* sub = argc > 1 ? argv[1] : "status";
-    if (!strcmp(sub, "wake")) {
-        wol::wake("console");
-        consoleWrite("OK sending magic packets (3x, 1 s apart); watching for 3 min\n");
-    } else if (!strcmp(sub, "check")) {
-        uint16_t port;
-        uint32_t ms = 0;
-        if (wol::check(&port, &ms)) consolef("UP %s answers on port %u (%lu ms)\n", wol::serverIp(), port, (unsigned long)ms);
-        else consolef("DOWN %s: no answer on %d or %d\n", wol::serverIp(), WOL_CHECK_PORT, WOL_CHECK_PORT_ALT);
-    } else if (!strcmp(sub, "ip") && argc >= 3) {
-        if (wol::setServerIp(argv[2])) consolef("OK server is %s\n", wol::serverIp());
-        else consolef("ERR not an IPv4 address (%s)\n", argv[2]);
-    } else if (!strcmp(sub, "auto") && argc >= 3) {
-        wol::setAutoWake(!strcmp(argv[2], "on"), argc >= 4 ? atoi(argv[3]) : 0);
-        consolef("OK auto-wake %s (%d min)\n", wol::autoWake() ? "on" : "off", wol::autoWakeMinutes());
+    const char* sub = argc > 1 ? argv[1] : "list";
+    if (!strcmp(sub, "list")) {
+        consolef("  wake-on-LAN %s\n", wol::enabled() ? "on" : "OFF (wol on to enable)");
+        listHosts();
+    } else if (!strcmp(sub, "on") || !strcmp(sub, "off")) {
+        wol::setEnabled(!strcmp(sub, "on"));
+        logEvent("WoL %s", wol::enabled() ? "on" : "off");
+        consolef("OK wake-on-LAN %s\n", wol::enabled() ? "on" : "off");
+    } else if (!strcmp(sub, "reset")) {
+        wol::resetToDefaults();
+        consoleWrite("OK machines reset to the .env / built-in list\n");
+        listHosts();
+    } else if (!strcmp(sub, "add") && argc >= 4) {
+        // The last argument may hold "ports broadcast" together (tokenizer keeps the rest).
+        char rest[48] = "";
+        char* ports = nullptr;
+        char* bcast = nullptr;
+        if (argc >= 6) {
+            strlcpy(rest, argv[5], sizeof(rest));
+            ports = strtok(rest, " ");
+            bcast = strtok(nullptr, " ");
+        }
+        wol::Host h;
+        char err[64];
+        if (!wol::makeHost(argv[2], argv[3], argc >= 5 ? argv[4] : "", ports, bcast, &h, err, sizeof(err))) {
+            consolef("ERR %s\n", err);
+            return;
+        }
+        int i = wol::put(h, err, sizeof(err));
+        if (i < 0) consolef("ERR %s\n", err);
+        else { consolef("OK %s saved as #%d\n", h.name, i + 1); logEvent("WoL host %s saved", h.name); }
+    } else if (argc >= 3 && (!strcmp(sub, "del") || !strcmp(sub, "wake") || !strcmp(sub, "check") ||
+                             !strcmp(sub, "auto"))) {
+        int i = wol::find(argv[2]);
+        if (i < 0) { consolef("ERR no machine '%s' (wol list)\n", argv[2]); return; }
+        const char* name = wol::host(i)->name;
+        if (!strcmp(sub, "del")) {
+            char n[16];
+            strlcpy(n, name, sizeof(n));
+            wol::remove(i);
+            logEvent("WoL host %s removed", n);
+            consolef("OK %s removed\n", n);
+        } else if (!strcmp(sub, "wake")) {
+            if (wol::wake(i, "console")) consolef("OK waking %s (3 packets, 1 s apart; watching 3 min)\n", name);
+            else consoleWrite("ERR wake-on-LAN is off (wol on)\n");
+        } else if (!strcmp(sub, "check")) {
+            uint16_t port;
+            uint32_t ms = 0;
+            if (!wol::host(i)->ip[0]) consolef("ERR %s has no IP set\n", name);
+            else if (wol::check(i, &port, &ms)) consolef("UP %s (%s) answers on port %u (%lu ms)\n", name, wol::host(i)->ip, port, (unsigned long)ms);
+            else consolef("DOWN %s (%s): no answer on %u/%u\n", name, wol::host(i)->ip, wol::host(i)->ports[0], wol::host(i)->ports[1]);
+        } else if (argc >= 4) {
+            wol::setAutoWake(i, !strcmp(argv[3], "on"), argc >= 5 ? atoi(argv[4]) : 0);
+            consolef("OK %s auto-wake %s (%d min)\n", name, wol::host(i)->autoWake ? "on" : "off", wol::host(i)->autoMin);
+        } else {
+            consoleWrite("ERR usage: wol auto <host> on|off [minutes]\n");
+        }
     } else {
-        consolef("  server:    %s at %s, %s\n", WOL_SERVER_NAME, wol::serverIp(),
-                 wol::lastState() < 0 ? "not checked yet" : wol::lastState() ? "up" : "down");
-        consolef("  auto-wake: %s (%d min)%s\n", wol::autoWake() ? "on" : "off", wol::autoWakeMinutes(),
-                 wol::waking() ? ", wake in progress" : "");
+        consoleWrite("ERR usage: wol [list] | add <name> <mac> [ip|-] [ports] [broadcast] | del|wake|check <host> |"
+                     " auto <host> on|off [min] | on | off | reset\n");
     }
 }
 
 static void cmdTelegram(int argc, char** argv) {
+    if (argc >= 3 && !strcmp(argv[1], "sim")) {
+        String text;                       // the tokenizer split the command: join it again
+        for (int i = 2; i < argc; i++) { if (i > 2) text += ' '; text += argv[i]; }
+        telegram::simulate(text.c_str());
+        return;
+    }
     if (argc >= 2 && !strcmp(argv[1], "ping")) {
         char out[160];
         bool ok = telegram::ping(out, sizeof(out));
@@ -353,11 +417,15 @@ static void cmdBackup(int argc, char** argv) {
 
 // CTAP over the console, for the PC test harness: "ctap <hex>" -> "CTAP <hex>"
 static void serialCtapReply(const uint8_t* data, size_t len) {
-    static char hex[2 * FIDO_MAX_MSG + 8];
-    hexEncode(data, len, hex);
-    consoleWrite("CTAP ");
-    consoleWrite(hex);
-    consoleWrite("\n");
+    // One write, so other log output can't land inside the line; the buffer
+    // only exists while replying (RAM is needed for TLS the rest of the time).
+    char* line = (char*)malloc(2 * len + 8);
+    if (!line) { consoleWrite("CTAP 7f\n"); return; }   // CTAP1_ERR_OTHER
+    memcpy(line, "CTAP ", 5);
+    hexEncode(data, len, line + 5);
+    strcat(line, "\n");
+    consoleWrite(line);
+    free(line);
 }
 
 static void cmdCtap(int argc, char** argv) {
@@ -499,6 +567,31 @@ static void execute(char* line) {
 
 void init() {
     s_len = 0;
+}
+
+void run(const char* line, String* output) {
+    size_t n = strlen(line) + 1;
+    char* buf = (char*)malloc(n);   // execute() edits the line; only held during the command
+    if (!buf) { if (output) *output += "ERR out of memory"; return; }
+    memcpy(buf, line, n);
+    consoleCapture(output);
+    execute(buf);
+    consoleCapture(nullptr);
+    crypto::wipe(buf, n);
+    free(buf);
+}
+
+bool sensitive(const char* line) {
+    while (*line == ' ') line++;
+    // Weakens protection, injects input, reaches secrets or erases evidence.
+    static const char* const RISKY[] = {
+        "auto on", "passkey del", "passkeys del", "unlock ", "bt forget", "ctap", "backup", "restore",
+        "wifi del", "wifi reset", "kbd type", "uvhours", "log clear", "hybrid", "time set", "tz ",
+        "approve", "uvpin", "setpin", "clearpin",
+    };
+    if (!strcmp(line, "unlock") || !strncmp(line, "unlock list", 11)) return false;
+    for (const char* r : RISKY) if (!strncmp(line, r, strlen(r))) return true;
+    return false;
 }
 
 void loop() {

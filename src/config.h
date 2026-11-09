@@ -67,21 +67,19 @@
 #define PORTAL_CRED_BACKOFF_SECS 1800          // after repeated rejections (avoids account lockout)
 #define PORTAL_MAX_FAILS        3              // rejections before the long back-off
 
-// --- Server wake-on-LAN (Proxmox host "pve", Dell OptiPlex 7040) ------------
-// The IP comes from DHCP and can change: `/setip` (Telegram) or `wol ip`
-// (console) overrides this default and is kept in NVS.
-#define WOL_SERVER_NAME         "pve"
-#define WOL_SERVER_MAC          {0x64, 0x00, 0x6A, 0x2B, 0x36, 0x9F}
-#define WOL_DEFAULT_IP          "172.16.114.175"
-#define WOL_DIRECTED_BROADCAST  "172.16.119.255"   // 172.16.112.0/21
+// --- Wake-on-LAN servers --------------------------------------------------------
+// Machines come from .env (WOL_1_NAME / _MAC / _IP / _PORTS / _BROADCAST,
+// WOL_2_..., like the WiFi list) on first boot or `wol reset`, and can be
+// added / changed later from Telegram, the web page or the console (kept in
+// NVS). Without any in .env, this default is used:
+#define WOL_DEFAULT_HOST        {"pve", "64:00:6a:2b:36:9f", "172.16.114.175", "8006,22", "172.16.119.255"}
+#define WOL_MAX_HOSTS           8
 #define WOL_UDP_PORT            9
-#define WOL_CHECK_PORT          8006               // Proxmox web UI
-#define WOL_CHECK_PORT_ALT      22                 // SSH, if 8006 doesn't answer
 #define WOL_CONNECT_TIMEOUT_MS  1500               // per port: a check blocks at most ~3 s
 #define WOL_PACKETS             3                  // magic packets per wake, 1 s apart
 #define WOL_WATCH_SECS          180                // after a wake: report when it is up
 #define WOL_WATCH_EVERY_SECS    10
-#define WOL_AUTO_CHECK_SECS     60                 // auto-wake: how often to look
+#define WOL_AUTO_CHECK_SECS     60                 // auto-wake: how often each host is looked at
 #define WOL_AUTO_DEFAULT_MIN    10                 // auto-wake: down this long -> wake
 #define WOL_AUTO_MAX_TRIES      3                  // then wait until it is seen up again
 

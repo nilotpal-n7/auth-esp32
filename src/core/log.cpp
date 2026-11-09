@@ -20,6 +20,8 @@ struct LogRing {
 // RTC memory keeps its contents through resets and crashes (not power loss).
 RTC_NOINIT_ATTR static LogRing s_ring;
 static bool     s_ready = false;     // ring valid (logInit ran)
+static uint32_t s_total = 0;         // events in the ring + added since boot (sequence numbers)
+static String*  s_capture = nullptr; // console output copy (remote commands)
 static bool     s_dirty = false;
 static uint32_t s_changedMs = 0, s_dirtySinceMs = 0;
 static Preferences s_prefs;
@@ -69,6 +71,7 @@ void logEvent(const char* fmt, ...) {
         strlcpy(s_ring.lines[s_ring.head], buf, LOG_LINE_LEN);
         s_ring.head = (s_ring.head + 1) % LOG_LINES;
         if (s_ring.count < LOG_LINES) s_ring.count++;
+        s_total++;
         s_changedMs = millis();
         if (!s_dirty) s_dirtySinceMs = s_changedMs;
         s_dirty = true;
@@ -77,6 +80,19 @@ void logEvent(const char* fmt, ...) {
 }
 
 int logCount() { return s_ready ? s_ring.count : 0; }
+
+uint32_t logTotal() { return s_total; }
+
+const char* logLineBySeq(uint32_t seq) {
+    if (!s_ready || seq >= s_total || s_total - seq > (uint32_t)s_ring.count) return "";
+    return logLine((int)(seq - (s_total - s_ring.count)));
+}
+
+void consoleCapture(String* out) {
+    lock();
+    s_capture = out;
+    unlock();
+}
 
 const char* logLine(int index) {
     if (!s_ready || index < 0 || index >= s_ring.count) return "";
@@ -100,6 +116,7 @@ void logInit() {
         }
     }
     for (int i = 0; i < LOG_LINES; i++) s_ring.lines[i][LOG_LINE_LEN - 1] = '\0';
+    s_total = s_ring.count;   // restored lines count as already seen
     s_ready = true;
     unlock();
 }
@@ -150,11 +167,13 @@ void consolef(const char* fmt, ...) {
     va_end(ap);
     lock();
     Serial.print(buf);
+    if (s_capture && s_capture->length() < 3000) *s_capture += buf;
     unlock();
 }
 
 void consoleWrite(const char* s) {
     lock();
     Serial.print(s);
+    if (s_capture && s_capture->length() < 3000) *s_capture += s;
     unlock();
 }

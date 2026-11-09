@@ -79,8 +79,9 @@ host come from `.env`). Leave `OTA_PASSWORD` empty to keep OTA off.
 | PIN entry | UP/DOWN change digit · OK next digit · hold OK submit · hold UP delete |
 
 The menu has: Passkeys (list/delete), Auto-approve, Device PIN, WiFi,
-Campus net, Bluetooth (keyboard on/off, forget pairings), Event log, Device
-info (shows the web page address), Reset passkeys.
+Campus net, Servers (wake-on-LAN), Remote (Telegram, web page), Bluetooth
+(keyboard on/off, forget pairings), Event log, Device info (shows the web page
+address), Reset passkeys.
 
 ### TOTP accounts
 
@@ -293,35 +294,82 @@ Windows notifications are turned off (Settings → System → Notifications), it
 shows a small pop-up that closes itself instead. `qr_bridge.py --no-notify`
 turns this off.
 
-### Wake the Proxmox server from Telegram
+### Wake-on-LAN machines and the Telegram remote
 
-The device can wake the Proxmox host (`pve`, Dell OptiPlex 7040, MAC
-`64:00:6a:2b:36:9f`) with wake-on-LAN and tells you over Telegram when it is
-up. The bot polls Telegram, so nothing has to be reachable from the internet.
+The device wakes machines on the LAN (Proxmox `pve` by default) and tells you
+when they are up. A Telegram bot controls it and the rest of the AuthKey. It
+polls Telegram, so nothing has to be reachable from the internet.
+
+**Machines.** Up to 8, each with a name, MAC, IP (optional: only needed for
+status checks), the TCP ports to check (default 8006, then 22), an optional
+directed broadcast, and its own auto-wake switch. Add them in `.env`
+(`WOL_1_NAME`, `WOL_1_MAC`, `WOL_1_IP`, `WOL_1_PORTS`, `WOL_1_BROADCAST`,
+then `WOL_2_…`; see `.env.example`), or later from Telegram (`/addhost`),
+the web page (Servers card), the OLED (Menu → Servers) or the console
+(`wol add`). One global switch (`/wol off`) stops all packets and auto-wake.
+
+- **Wake:** magic packet (6× `FF` + 16× MAC, UDP 9) to 255.255.255.255, the
+  machine's broadcast and the WiFi subnet's broadcast, 3 times 1 s apart.
+  Then it checks every 10 s and reports 🟢 when it's up, or 🔴 after 3 min.
+- **Status:** TCP connect to the machine's ports (more reliable than ping).
+- **Auto-wake** (per machine, **off by default** so it doesn't fight a
+  deliberate shutdown): wake it when it has been unreachable for N minutes,
+  at most 3 tries until it is seen up again.
+
+**Telegram commands** (`/menu` shows them as buttons; Telegram also lists
+them when you type `/`):
 
 | Command | What it does |
 | --- | --- |
-| `/wake` | Magic packet (6× `FF` + 16× MAC, UDP 9) to 255.255.255.255 and 172.16.119.255, 3 times 1 s apart; then checks every 10 s and reports 🟢 when it's up, or 🔴 after 3 min |
-| `/status` | 🟢 up / 🔴 down: TCP connect to the Proxmox UI (8006), falling back to SSH (22) |
-| `/autowake on\|off [min]` | Wake it when it has been unreachable for N minutes (default 10, at most 3 tries until it's seen up again). **Off by default**, so it doesn't fight a deliberate shutdown. Kept in NVS |
-| `/setip <ip>` | The server's address (DHCP can change it; default 172.16.114.175). Kept in NVS |
-| `/help` | The list |
+| `/wake [machine\|all]` | Wake, then report when it's up |
+| `/status [machine\|all]` | 🟢 up / 🔴 down |
+| `/hosts` | Machines and their last state, with Wake / Check buttons |
+| `/autowake <machine\|all> on\|off [min]` | Auto-wake per machine |
+| `/addhost <name> <mac> [ip] [ports] [broadcast]` | Add or replace a machine |
+| `/sethost <machine> ip\|mac\|ports\|broadcast\|name <value>` | Change one field (e.g. a new DHCP address) |
+| `/delhost <machine>` · `/wol on\|off` | Remove a machine · the global switch |
+| `/info` · `/log [n]` | Device status (WiFi, campus, Bluetooth, RAM…) · event log |
+| `/portal [login\|logout\|on\|off]` | Campus internet login |
+| `/set [switch on\|off]` | Switches: campus auto-login, wake-on-LAN, auto-approve, keyboard, web page |
+| `/notify off\|important\|all` | Push notifications for events (default: important = boots, campus drops, sign-ins, PIN / pairing / backup changes) |
+| `/totp` · `/code <account>` | Account names · a TOTP code (only if allowed on the device) |
+| `/hybrid <FIDO:/…>` | Passkey sign-in from a QR's text |
+| `/cmd <console command>` | Run any console command and get its output |
+| `/reboot` · `/help` | |
 
-Setup:
+**Security rules:**
+
+- Only the chat IDs in `.env` get answers; other chats are ignored and logged.
+- Commands that weaken protection, inject input, reach secrets or erase
+  evidence need **OK pressed on the AuthKey** when they come from Telegram:
+  turning auto-approve on, deleting passkeys or paired PCs, forgetting
+  Bluetooth, raw CTAP, backup / restore, keyboard typing, `hybrid`, clearing
+  the log, changing the clock, longer PIN sessions.
+- TOTP codes are never sent unless you allow it **on the device** (Menu →
+  Remote → TG codes). Telegram can't switch that on, because whoever reads
+  the chat would hold your second factor.
+- Commands older than 2 minutes (sent while the AuthKey was off) are ignored,
+  so a stale `/wake` never starts a machine later.
+
+**Device screens:** Menu → **Servers** lists the machines (UP / down / ?);
+OK on one gives Wake, Check now and Auto-wake on/off, and the last row is the
+global switch. Menu → **Remote** shows the bot's state and switches the
+notification level, TOTP codes over Telegram and the web page.
+
+**Setup:**
 
 1. Create a bot with [@BotFather](https://t.me/BotFather) and put its token in
    `.env` as `TELEGRAM_BOT_TOKEN=`. Leave `TELEGRAM_CHAT_ID=` empty and flash.
 2. Send your bot any message. With no chat ID set, the device only logs the
    sender's chat ID (serial: `[TG] chat ID 123456789 ...`, and the event log).
 3. Put that number in `.env` as `TELEGRAM_CHAT_ID=` (comma-separate several)
-   and flash again. Only those chats get answers; others are ignored and
-   logged to serial.
+   and flash again. Send `/menu`.
 
-Console (USB) equivalents for testing: `wol`, `wol wake`, `wol check`,
-`wol ip <ip>`, `wol auto on|off [min]`, `tg`, and `tg ping` (a verified TLS
-connection to Telegram, no token needed). Commands older than 2 minutes
-(sent while the AuthKey was off) are ignored, so a stale `/wake` never
-starts the server later.
+Console (USB): `wol [list]`, `wol add <name> <mac> [ip|-] [ports] [broadcast]`,
+`wol del|wake|check <machine>`, `wol auto <machine> on|off [min]`,
+`wol on|off`, `wol reset` (back to `.env`), `tg`, `tg ping` (a verified TLS
+connection to Telegram, no token needed) and `tg sim <command>`, which runs a
+bot command and prints the reply here (testing without Telegram).
 
 The Telegram certificate is verified against Go Daddy Root G2. A failed check
 is logged (`TG cert check failed`) and never bypassed. The campus network
@@ -331,7 +379,8 @@ refresh or login and during hybrid sign-ins, then reconnects. A task
 watchdog reboots the device if the main loop ever stalls for 60 s.
 
 RAM is the tight resource: a TLS session peaks at ~54 KB and the core's
-mbedTLS has fixed 16 KB buffers. When the heap runs short, mbedTLS reports it
+mbedTLS has fixed 16 KB buffers. The hybrid sign-in's ~7 KB of buffers are
+allocated only while a session runs, so the bot and the portal have room. When the heap runs short, mbedTLS reports it
 as "certificate verification failed", so `mem` (free heap, largest block,
 loop-stack use) and `tlstest` (a verified connection to the hybrid tunnel
 server, with the chain and mbedTLS's reason on failure) are there to tell

@@ -59,6 +59,14 @@ for i in indices:
 ota_password = secrets.get("OTA_PASSWORD", "")
 iitg_user = secrets.get("IITG_USERNAME", "")
 iitg_pass = secrets.get("IITG_PASSWORD", "")
+# Wake-on-LAN machines: WOL_<n>_NAME / _MAC / _IP / _PORTS / _BROADCAST.
+wol_hosts = []
+for i in sorted({int(k.split("_")[1]) for k in secrets if re.match(r"WOL_\d+_NAME$", k)}):
+    name = secrets.get(f"WOL_{i}_NAME", "")
+    mac = secrets.get(f"WOL_{i}_MAC", "")
+    if name and mac:
+        wol_hosts.append((name, mac, secrets.get(f"WOL_{i}_IP", ""),
+                          secrets.get(f"WOL_{i}_PORTS", "8006,22"), secrets.get(f"WOL_{i}_BROADCAST", "")))
 tg_token = secrets.get("TELEGRAM_BOT_TOKEN", "")
 tg_chats = secrets.get("TELEGRAM_CHAT_ID", "").replace(" ", "")
 
@@ -71,6 +79,10 @@ header += [f"    {{ {c_string(s)}, {c_string(p)} }}, \\" for s, p in networks]
 header += ["", f"#define SECRET_OTA_PASSWORD {c_string(ota_password)}"]
 header += [f"#define SECRET_IITG_USER {c_string(iitg_user)}",
           f"#define SECRET_IITG_PASS {c_string(iitg_pass)}"]
+if wol_hosts:
+    header += ["#define SECRET_WOL_HOSTS \\"]
+    header += ["    { " + ", ".join(c_string(v) for v in h) + " }, \\" for h in wol_hosts]
+    header += [""]
 header += [f"#define SECRET_TG_TOKEN {c_string(tg_token)}",
            f"#define SECRET_TG_CHATS {c_string(tg_chats)}", ""]
 content = "\n".join(header)
@@ -85,6 +97,7 @@ if old != content:  # rewrite only on change, so unchanged secrets don't force a
 env.Prepend(CPPPATH=[gen_dir])  # noqa: F821
 print(f"env_secrets: {len(networks)} WiFi network(s), OTA {'enabled' if ota_password else 'disabled'}, "
       f"IITG portal {'set' if (iitg_user and iitg_pass) else 'off'}, "
+      f"{len(wol_hosts) or 'default'} WoL host(s), "
       f"Telegram bot {'off' if not tg_token else ('set' if tg_chats else 'set, chat ID missing (finder mode)')}")
 
 # OTA uploads: password and host come from .env too.

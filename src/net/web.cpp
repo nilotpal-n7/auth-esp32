@@ -7,7 +7,9 @@
 #include "fido/credentials.h"
 #include "net/network.h"
 #include "net/portal.h"
+#include "net/telegram.h"
 #include "net/web_page.h"
+#include "net/wol.h"
 #include "totp/totp.h"
 #include "transport/ble.h"
 #include "transport/hybrid.h"
@@ -148,6 +150,8 @@ static void handleStatus() {
     o += "},\"totp\":";           o += totp::count();
     o += ",\"passkeys\":";        o += creds::residentCount();
     o += ",\"passkeyCapacity\":"; o += creds::residentCapacity();
+    o += ",\"servers\":";        o += wol::count();
+    o += ",\"wol\":";            o += wol::enabled() ? "true" : "false";
     o += ",\"hybrid\":";          jstr(o, hybrid::state() == hybrid::State::Idle ? "" : hybrid::stateText());
     o += '}';
     sendJson(200, o);
@@ -309,23 +313,151 @@ static void handleHybrid() {
     sendJson(200, "{\"ok\":true}");
 }
 
+// --- Wake-on-LAN machines ---------------------------------------------------------------
+
+static void handleHosts() {
+    if (!guard(false)) return;
+    String o = "{\"enabled\":";
+    o += wol::enabled() ? "true" : "false";
+    o += ",\"hosts\":[";
+    char mac[18];
+    for (int i = 0; i < wol::count(); i++) {
+        const wol::Host* h = wol::host(i);
+        wol::formatMac(h->mac, mac, sizeof(mac));
+        if (i) o += ',';
+        o += "{\"i\":"; o += i;
+        o += ",\"name\":"; jstr(o, h->name);
+        o += ",\"mac\":"; jstr(o, mac);
+        o += ",\"ip\":"; jstr(o, h->ip);
+        o += ",\"ports\":\""; o += h->ports[0]; if (h->ports[1]) { o += ','; o += h->ports[1]; } o += '"';
+        o += ",\"broadcast\":"; jstr(o, h->broadcast);
+        o += ",\"state\":"; o += wol::lastState(i);
+        o += ",\"waking\":"; o += wol::waking(i) ? "true" : "false";
+        uint32_t age = wol::lastCheckAgeS(i);
+        o += ",\"age\":"; o += age == UINT32_MAX ? -1 : (long)age;
+        o += ",\"auto\":"; o += h->autoWake ? "true" : "false";
+        o += ",\"autoMin\":"; o += h->autoMin;
+        o += '}';
+    }
+    o += "]}";
+    sendJson(200, o);
+}
+
+static int hostParam() {
+    int i = s_http.arg("i").toInt();
+    if (s_http.arg("i").length() == 0 || !wol::host(i)) { sendError(404, "no such machine"); return -1; }
+    return i;
+}
+
+static void handleHostWake() {
+    if (!guard(true)) return;
+    int i = hostParam();
+    if (i < 0) return;
+    if (!wol::wake(i, "web")) { sendError(409, "wake-on-LAN is off"); return; }
+    sendJson(200, "{\"ok\":true}");
+}
+
+static void handleHostCheck() {
+    if (!guard(true)) return;
+    int i = hostParam();
+    if (i < 0) return;
+    uint16_t port;
+    uint32_t ms = 0;
+    bool up = wol::check(i, &port, &ms);
+    sendJson(200, String("{\"up\":") + (up ? "true" : "false") + ",\"port\":" + port + ",\"ms\":" + ms + "}");
+}
+
+static void handleHostAuto() {
+    if (!guard(true)) return;
+    int i = hostParam();
+    if (i < 0) return;
+    wol::setAutoWake(i, s_http.arg("on") == "1", s_http.arg("min").toInt());
+    sendJson(200, "{\"ok\":true}");
+}
+
+static void handleHostSave() {
+    if (!guard(true)) return;
+    wol::Host h;
+    char err[64];
+    if (!wol::makeHost(s_http.arg("name").c_str(), s_http.arg("mac").c_str(), s_http.arg("ip").c_str(),
+                       s_http.arg("ports").c_str(), s_http.arg("broadcast").c_str(), &h, err, sizeof(err))) {
+        sendError(400, err);
+        return;
+    }
+    int old = wol::find(h.name);
+    if (old >= 0) { h.autoWake = wol::host(old)->autoWake; h.autoMin = wol::host(old)->autoMin; }
+    if (wol::put(h, err, sizeof(err)) < 0) { sendError(507, err); return; }
+    logEvent("WoL host %s saved (web)", h.name);
+    sendJson(200, "{\"ok\":true}");
+}
+
+static void handleHostDelete() {
+    if (!guard(true)) return;
+    int i = hostParam();
+    if (i < 0) return;
+    String name = wol::host(i)->name;
+    wol::remove(i);
+    logEvent("WoL host %s removed (web)", name.c_str());
+    sendJson(200, "{\"ok\":true}");
+}
+
+static void handleWolSwitch() {
+    if (!guard(true)) return;
+    wol::setEnabled(s_http.arg("on") == "1");
+    logEvent("WoL %s (web)", wol::enabled() ? "on" : "off");
+    sendJson(200, "{\"ok\":true}");
+}
+
+// --- Remote access ------------------------------------------------------------------------
+
+static void handleRemote() {
+    if (!guard(false)) return;
+    String o = "{\"telegram\":";
+    jstr(o, telegram::stateStr());
+    o += ",\"error\":"; jstr(o, telegram::lastError());
+    o += ",\"notify\":"; o += telegram::notifyLevel();
+    o += ",\"codes\":"; o += telegram::remoteCodes() ? "true" : "false";
+    o += '}';
+    sendJson(200, o);
+}
+
+// Notification level only: "codes over Telegram" can only change on the device.
+static void handleRemoteSet() {
+    if (!guard(true)) return;
+    if (s_http.hasArg("notify")) telegram::setNotifyLevel(s_http.arg("notify").toInt());
+    sendJson(200, "{\"ok\":true}");
+}
+
 static void start() {
-    static const char* headers[] = {"Cookie", "X-AuthKey"};
-    s_http.collectHeaders(headers, 2);
-    s_http.on("/", HTTP_GET, handlePage);
-    s_http.on("/api/status", HTTP_GET, handleStatus);
-    s_http.on("/api/session", HTTP_POST, handleSessionStart);
-    s_http.on("/api/session", HTTP_GET, handleSessionPoll);
-    s_http.on("/api/logout", HTTP_POST, handleLogout);
-    s_http.on("/api/log", HTTP_GET, handleLog);
-    s_http.on("/api/portal", HTTP_POST, handlePortal);
-    s_http.on("/api/totp", HTTP_GET, handleTotpList);
-    s_http.on("/api/totp/add", HTTP_POST, handleTotpAdd);
-    s_http.on("/api/totp/delete", HTTP_POST, handleTotpDelete);
-    s_http.on("/api/passkeys", HTTP_GET, handlePasskeyList);
-    s_http.on("/api/passkeys/delete", HTTP_POST, handlePasskeyDelete);
-    s_http.on("/api/hybrid", HTTP_POST, handleHybrid);
-    s_http.onNotFound([]() { sendError(404, "not found"); });
+    static bool routes = false;   // handlers are registered once; begin() may run again
+    if (!routes) {
+        routes = true;
+        static const char* headers[] = {"Cookie", "X-AuthKey"};
+        s_http.collectHeaders(headers, 2);
+        s_http.on("/", HTTP_GET, handlePage);
+        s_http.on("/api/status", HTTP_GET, handleStatus);
+        s_http.on("/api/session", HTTP_POST, handleSessionStart);
+        s_http.on("/api/session", HTTP_GET, handleSessionPoll);
+        s_http.on("/api/logout", HTTP_POST, handleLogout);
+        s_http.on("/api/log", HTTP_GET, handleLog);
+        s_http.on("/api/portal", HTTP_POST, handlePortal);
+        s_http.on("/api/totp", HTTP_GET, handleTotpList);
+        s_http.on("/api/totp/add", HTTP_POST, handleTotpAdd);
+        s_http.on("/api/totp/delete", HTTP_POST, handleTotpDelete);
+        s_http.on("/api/passkeys", HTTP_GET, handlePasskeyList);
+        s_http.on("/api/passkeys/delete", HTTP_POST, handlePasskeyDelete);
+        s_http.on("/api/hybrid", HTTP_POST, handleHybrid);
+        s_http.on("/api/hosts", HTTP_GET, handleHosts);
+        s_http.on("/api/hosts/wake", HTTP_POST, handleHostWake);
+        s_http.on("/api/hosts/check", HTTP_POST, handleHostCheck);
+        s_http.on("/api/hosts/auto", HTTP_POST, handleHostAuto);
+        s_http.on("/api/hosts/save", HTTP_POST, handleHostSave);
+        s_http.on("/api/hosts/delete", HTTP_POST, handleHostDelete);
+        s_http.on("/api/wol", HTTP_POST, handleWolSwitch);
+        s_http.on("/api/remote", HTTP_GET, handleRemote);
+        s_http.on("/api/remote", HTTP_POST, handleRemoteSet);
+        s_http.onNotFound([]() { sendError(404, "not found"); });
+    }
     s_http.begin();
     MDNS.addService("http", "tcp", 80);
     s_started = true;
@@ -333,6 +465,10 @@ static void start() {
 }
 
 void loop() {
+    if (!settings::webPage()) {
+        if (s_started) { s_http.stop(); s_started = false; logf("WEB", "web page off"); }
+        return;
+    }
     if (!s_started) {
         if (network::connected()) start();
         return;
