@@ -938,7 +938,7 @@ static void cmdVm(long long chat, char* arg) {
         return;
     }
     if (pveBusy(chat)) return;
-    proxmox::Guest g[24];
+    static proxmox::Guest g[24];   // static: the loop stack is small
     int count = 0;
     String err;
     if (!proxmox::guests(c, g, 24, &count, err) && !count) { reply(chat, "❌ " + err); return; }

@@ -367,7 +367,7 @@ static void cmdPve(int argc, char** argv) {
         proxmox::unpin(c);
         consolef("OK %s: the next certificate seen is pinned\n", proxmox::machine(c));
     } else if (!strcmp(sub, "guests")) {
-        proxmox::Guest g[24];
+        static proxmox::Guest g[24];
         int n = 0;
         bool ok = proxmox::guests(c, g, 24, &n, out);
         for (int i = 0; i < n; i++) consolef("  %d %-20s %s %s\n", g[i].vmid, g[i].name, g[i].lxc ? "CT" : "VM", g[i].running ? "running" : "stopped");

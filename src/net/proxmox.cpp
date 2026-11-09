@@ -187,9 +187,17 @@ public:
         }
         tls_.setInsecure();                    // self-signed: checked by the pin below instead
         tls_.setHandshakeTimeout(10);
-        if (!tls_.connect(ip_, port_)) {
-            char why[80] = "";
-            tls_.lastError(why, sizeof(why));
+        bool ok = tls_.connect(ip_, port_);
+        char why[80] = "";
+        if (!ok && tls_.lastError(why, sizeof(why)) == -0x7F00 /* MBEDTLS_ERR_SSL_ALLOC_FAILED */) {
+            // Right after the bot hangs up the heap can still be fragmented: once more.
+            tls_.stop();
+            delay(300);
+            why[0] = '\0';
+            ok = tls_.connect(ip_, port_);
+            if (!ok) tls_.lastError(why, sizeof(why));
+        }
+        if (!ok) {
             err = String("can't reach ") + name + " (" + ip_.toString() + ":" + port_ + "): " + (why[0] ? why : "no answer");
             tls_.stop();
             return false;
@@ -467,7 +475,7 @@ bool summary(int c, String& out) {
              gb(s["rootfs"]["used"] | 0.0).c_str(), gb(s["rootfs"]["total"] | 0.0).c_str());
     out += line;
 
-    Guest g[MAX_GUESTS];
+    static Guest g[MAX_GUESTS];   // static: the loop stack is small
     int n = 0, running = 0;
     String gerr;
     loadGuests(api, c, g, MAX_GUESTS, &n, gerr);
@@ -507,7 +515,7 @@ bool guestPower(int c, int vmid, const char* action, String& out) {
     Api api(c);
     String err;
     if (!ensureNode(api, c, err)) { out = pinNotice(c) + "❌ " + err; return false; }
-    Guest g[MAX_GUESTS];
+    static Guest g[MAX_GUESTS];   // static: the loop stack is small
     int n = 0;
     loadGuests(api, c, g, MAX_GUESTS, &n, err);
     const Guest* found = nullptr;
