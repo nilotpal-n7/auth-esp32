@@ -11,6 +11,7 @@
 #include "config.h"
 #include "cli/cli.h"
 #include "core/approval.h"
+#include "core/backup.h"
 #include "core/log.h"
 #include "core/settings.h"
 #include "crypto/crypto.h"
@@ -18,6 +19,7 @@
 #include "fido/ctap2.h"
 #include "net/network.h"
 #include "net/portal.h"
+#include "net/proxmox.h"
 #include "net/telegram.h"
 #include "net/web.h"
 #include "net/wol.h"
@@ -91,6 +93,7 @@ void setup() {
     network::setOtaProgressHandler(ui::otaProgress);
     portal::init();
     wol::init();
+    proxmox::init();
     telegram::init();
 
     cli::init();
@@ -119,6 +122,7 @@ void loop() {
     if (ble::takeProvisioning(qr, sizeof(qr))) hybrid::start(qr);
 
     wol::loop();
+    backup::loop();
     hybrid::loop();
     unlock::loop();
     web::loop();

@@ -70,6 +70,11 @@ pre{margin:0;font:12px/1.5 ui-monospace,Consolas,monospace;white-space:pre-wrap;
 <input id="hBc" placeholder="broadcast (optional)"></div>
 <div class="row" style="margin-top:8px"><button class="primary" onclick="saveHost()">Save</button><span class="muted">Same name = update.</span></div></details></div>
 
+<div class="card"><h2>Firmware <span class="muted" id="fwCur"></span></h2>
+<p class="muted" style="margin:0 0 8px">Install a new <b>firmware.bin</b> (PlatformIO: .pio/build/esp32dev/firmware.bin) over WiFi. The AuthKey shows the version and installs it only after you press OK there.</p>
+<div class="row"><input type="file" id="fwFile" accept=".bin" style="width:auto;flex:1"><button class="primary" id="fwBtn" onclick="fwUpload()">Upload</button></div>
+<div class="muted" id="fwMsg" style="margin-top:6px"></div></div>
+
 <div class="card"><h2>Remote (Telegram)</h2>
 <div class="grid"><div><div class="k">Bot</div><div class="v" id="tgState">-</div></div>
 <div><div class="k">Notifications</div><div class="v"><select id="tgNotify" onchange="setNotify(this.value)"><option value="0">off</option><option value="1">important</option><option value="2">all events</option></select></div></div>
@@ -124,12 +129,33 @@ $('totplist').innerHTML=j.accounts.map(a=>'<li><span class="name">'+esc(a.name)+
 function ago(a){return a<0?'not checked':a<120?a+' s ago':Math.round(a/60)+' min ago'}
 async function loadHosts(){const j=await api('/api/hosts');$('wolBtn').textContent='Wake-on-LAN: '+(j.enabled?'ON':'off');
 $('hostlist').innerHTML=j.hosts.map(h=>{const st=h.waking?'⏳':h.state>0?'🟢':h.state==0?'🔴':'⚪';
-return '<li><span class="name">'+st+' <b>'+esc(h.name)+'</b> <span class="muted">'+esc(h.ip||'no IP')+' · '+esc(h.mac)+' · '+ago(h.age)+(h.auto?' · auto-wake '+h.autoMin+' min':'')+'</span></span>'+
+const extra=(h.auto?' · auto-wake '+h.autoMin+' min':'')+(h.paused?' · ⏸ paused'+(h.pausedUntil>0?' until '+new Date(h.pausedUntil*1000).toLocaleString([], {weekday:'short',hour:'2-digit',minute:'2-digit'}):' until up'):'')+(h.alerts?'':' · alerts off')+(h.maint.length?' · 🛠 '+h.maint.map(esc).join('; ')+(h.inMaint?' (now)':''):'');
+return '<li><span class="name">'+st+' <b>'+esc(h.name)+'</b> <span class="muted">'+esc(h.ip||'no IP')+' · '+esc(h.mac)+' · '+ago(h.age)+extra+'</span></span>'+
 '<span class="row"><button class="primary" onclick="hostDo(\'wake\','+h.i+')">Wake</button><button onclick="hostDo(\'check\','+h.i+')">Check</button>'+
-'<button onclick="hostAuto('+h.i+','+(h.auto?0:1)+')">Auto '+(h.auto?'on':'off')+'</button><button onclick="editHost('+h.i+')">Edit</button><button class="danger" onclick="delHost('+h.i+',\''+esc(h.name)+'\')">✕</button></span></li>'}).join('')||'<li class="muted">No machines yet.</li>';
+'<button onclick="hostAuto('+h.i+','+(h.auto?0:1)+')">Auto '+(h.auto?'on':'off')+'</button>'+
+'<button onclick="hostSet(\'alerts\','+h.i+',\'on='+(h.alerts?0:1)+'\')">Alerts '+(h.alerts?'on':'off')+'</button>'+
+'<button onclick="hostSet(\'pause\','+h.i+',\'secs='+(h.paused?0:7200)+'\')">'+(h.paused?'Resume':'Pause 2 h')+'</button>'+
+'<button onclick="hostMaint('+h.i+','+h.maint.length+')">Maint…</button>'+
+'<button onclick="editHost('+h.i+')">Edit</button><button class="danger" onclick="delHost('+h.i+',\''+esc(h.name)+'\')">✕</button></span></li>'}).join('')||'<li class="muted">No machines yet.</li>';
 window._hosts=j.hosts}
 async function hostDo(what,i){try{const r=await post('/api/hosts/'+what+'?i='+i);msg(what=='wake'?'Magic packets on the way; watching 3 min':(r.up?'🟢 up (port '+r.port+', '+r.ms+' ms)':'🔴 down'));loadHosts()}catch(e){msg(e.message)}}
 async function hostAuto(i,on){const m=on?prompt('Wake it after how many minutes unreachable?','10'):0;if(on&&!m)return;try{await post('/api/hosts/auto?i='+i+'&on='+on+'&min='+(m||0));loadHosts()}catch(e){msg(e.message)}}
+async function hostSet(what,i,q){try{await post('/api/hosts/'+what+'?i='+i+'&'+q);loadHosts()}catch(e){msg(e.message)}}
+async function hostMaint(i,n){const v=prompt('Weekly maintenance window, e.g. "sat 00:00 120" (days, start, minutes; days: sun..sat, sat,sun, mon-fri, daily).'+(n?' Type "clear" to remove all.':''),'');if(v===null||!v.trim())return;
+try{await post('/api/hosts/maint?i='+i+'&'+(v.trim()=='clear'?'clear=1':'add='+encodeURIComponent(v.trim())));msg('Saved');loadHosts()}catch(e){msg(e.message)}}
+async function loadFw(){const f=await api('/api/update');$('fwCur').textContent='running v'+f.version+' ('+f.build.replace('|',', built ')+')'}
+function fwUpload(){const f=$('fwFile').files[0];if(!f){msg('Choose firmware.bin first');return}
+const x=new XMLHttpRequest();const fd=new FormData();fd.append('fw',f,f.name);$('fwBtn').disabled=true;
+x.upload.onprogress=e=>{if(e.lengthComputable)$('fwMsg').textContent='Uploading… '+Math.round(e.loaded*100/e.total)+' %'};
+x.onload=async()=>{let r={};try{r=JSON.parse(x.responseText)}catch(e){}
+if(x.status!=200){$('fwMsg').textContent='Not installed: '+(r.error||('HTTP '+x.status));$('fwBtn').disabled=false;return}
+$('fwMsg').textContent='v'+r.version+' received ('+Math.round(r.size/1024)+' KB). Press OK on the AuthKey to install it…';
+for(let i=0;i<45;i++){await new Promise(z=>setTimeout(z,1000));let p;try{p=await api('/api/update?id='+r.id)}catch(e){continue}
+if(p.state==='installed'){$('fwMsg').textContent='Installed. The AuthKey restarts now; this page reloads in 25 s (allow the browser again afterwards).';setTimeout(()=>location.reload(),25000);return}
+if(p.state!=='waiting'){$('fwMsg').textContent=p.state==='denied'?'Not installed: denied on the device.':'Not installed: '+(p.error||p.state);break}}
+$('fwBtn').disabled=false};
+x.onerror=()=>{$('fwMsg').textContent='Upload failed (connection lost).';$('fwBtn').disabled=false};
+x.open('POST','/api/update');x.setRequestHeader('X-AuthKey','1');x.withCredentials=true;x.send(fd)}
 async function delHost(i,n){if(!confirm('Remove '+n+'?'))return;try{await post('/api/hosts/delete?i='+i);loadHosts()}catch(e){msg(e.message)}}
 function editHost(i){const h=window._hosts[i];$('hName').value=h.name;$('hMac').value=h.mac;$('hIp').value=h.ip;$('hPorts').value=h.ports;$('hBc').value=h.broadcast;document.querySelector('details:has(#hName)').open=true}
 async function saveHost(){const q=['name','mac','ip','ports','broadcast'].map((k,n)=>k+'='+encodeURIComponent($(['hName','hMac','hIp','hPorts','hBc'][n]).value.trim())).join('&');
@@ -137,7 +163,7 @@ try{await post('/api/hosts/save?'+q);msg('Saved');loadHosts()}catch(e){msg(e.mes
 async function wolSwitch(){try{const j=await api('/api/hosts');await post('/api/wol?on='+(j.enabled?0:1));loadHosts()}catch(e){msg(e.message)}}
 async function loadRemote(){const r=await api('/api/remote');$('tgState').textContent=r.telegram+(r.error?' ('+r.error+')':'');$('tgNotify').value=r.notify;$('tgCodes').textContent=r.codes?'allowed':'off'}
 async function setNotify(v){try{await post('/api/remote?notify='+v);msg('Saved')}catch(e){msg(e.message)}}
-function loadAll(){loadLog().catch(()=>{});loadPk().catch(()=>{});loadTotp().catch(()=>{});loadHosts().catch(()=>{});loadRemote().catch(()=>{})}
+function loadAll(){loadLog().catch(()=>{});loadPk().catch(()=>{});loadTotp().catch(()=>{});loadHosts().catch(()=>{});loadRemote().catch(()=>{});loadFw().catch(()=>{})}
 async function portal(d){try{await post('/api/portal?do='+d);msg({login:'Logging in...',logout:'Logged out; auto-login paused',on:'Auto-login on',off:'Auto-login off'}[d]);setTimeout(()=>{status();loadLog()},1500)}catch(e){msg(e.message)}}
 async function delPk(slot,rp){if(!confirm('Delete the passkey for '+rp+'? You will not be able to sign in to it with this key any more.'))return;
 try{await post('/api/passkeys/delete?slot='+slot);msg('Deleted');loadPk();status()}catch(e){msg(e.message)}}

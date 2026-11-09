@@ -25,4 +25,14 @@ void restoreBegin(const uint8_t key[32], const uint8_t nonce[12], size_t len);
 void restoreData(const char* hex);
 void restoreEnd();
 
+// Reminder: about once an hour the device checks whether what a backup holds
+// (master key, passkeys, TOTP accounts, paired PCs) changed since the last
+// export, or the last one is older than 30 days, and if so calls `fn` (the
+// Telegram bot) at most once a week.
+typedef void (*ReminderFn)(const char* text);
+void setReminder(ReminderFn fn);
+void loop();
+// "last backup 3 d ago, up to date" (for `status` / /info).
+void describe(char* out, size_t cap);
+
 }  // namespace backup

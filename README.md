@@ -63,9 +63,25 @@ All secrets live in `.env` (git-ignored): `WIFI_<n>_SSID` / `WIFI_<n>_PASSWORD`,
 auto-login, below). `scripts/env_secrets.py` reads it at build
 time, so nothing secret is kept in `src/`.
 
-**Updates over WiFi (OTA):** set `OTA_PASSWORD` in `.env`, flash once over
-USB, then update wirelessly with `pio run -e ota -t upload` (password and
-host come from `.env`). Leave `OTA_PASSWORD` empty to keep OTA off.
+**Updates over WiFi, through the web page (recommended):**
+
+```bash
+pio run -e web -t upload                   # build, upload over WiFi, confirm twice on the AuthKey
+python tools/webflash.py [--host <ip>] [firmware.bin]   # the same with an existing .bin
+```
+
+Or open the web page, allow the browser, and use the **Firmware** card. The
+image is written to the spare app slot and checked (ESP32 header, SHA-256 and
+an AuthKey tag, so a wrong `.bin` is refused). Nothing changes until you press
+OK on the AuthKey, which shows the version it received (plus the device PIN,
+if set). No USB means the PC helper keeps its Bluetooth link and the PC
+doesn't lock. It also needs no inbound connection to the PC, so Windows
+Firewall doesn't matter. Flash over USB once to get a firmware that has the
+Firmware card.
+
+**espota (ArduinoOTA):** set `OTA_PASSWORD` in `.env`, then
+`pio run -e ota -t upload`. espota makes the device connect back to the PC,
+which Windows Firewall usually blocks. Leave `OTA_PASSWORD` empty to keep it off.
 
 ## Using it
 
@@ -312,9 +328,31 @@ the web page (Servers card), the OLED (Menu → Servers) or the console
   machine's broadcast and the WiFi subnet's broadcast, 3 times 1 s apart.
   Then it checks every 10 s and reports 🟢 when it's up, or 🔴 after 3 min.
 - **Status:** TCP connect to the machine's ports (more reliable than ping).
+- **Monitor:** every machine with an IP is checked about once a minute.
+- **Alerts** (per machine, on by default): "🔴 pve went down" after 2 missed
+  checks in a row (about 2 min), "🟢 pve is back up (it was down 8 min)" on
+  the next answer. Only real changes are reported, never the first state
+  after a boot. They are muted by `/notify off`.
 - **Auto-wake** (per machine, **off by default** so it doesn't fight a
-  deliberate shutdown): wake it when it has been unreachable for N minutes,
-  at most 3 tries until it is seen up again.
+  deliberate shutdown): wake it when it has been unreachable for N minutes
+  (default 10; 5 / 10 / 30 / 60 are buttons). At most 3 tries, then it waits
+  until the machine is seen up again.
+- **Pause** (`/pause pve 2h`, or the button): no alerts and no auto-wake
+  until then. `up` pauses until it is seen up again. A shutdown from Telegram
+  (`/pve shutdown`) does that by itself and tells you when it is off.
+- **Maintenance windows** (weekly, up to 2 per machine, local time, e.g.
+  `sat 00:00 120` for the weekly updates and `sun 00:00 120` for the backup):
+  - 5 min before the window, the machine is woken if it is off, so the
+    scheduled job runs. Switch this off with the "Wake before maintenance"
+    button or `/maint pve wake off`.
+  - Restarts inside the window don't alert, and auto-wake waits until it ends.
+  - When the window ends you get a summary: up or down, and how often it
+    restarted. With Proxmox set up it also lists the backups that ran in the
+    window (✅ / ⚠️ / ❌ and how long they took), pending host updates, and
+    whether the host rebooted.
+
+  Set them in `.env` (`WOL_1_MAINT=sat 00:00 120; sun 00:00 120`), with
+  `/maint`, the web page (**Maint…**) or `wol maint`.
 
 **Telegram commands** (`/menu` shows them as buttons; Telegram also lists
 them when you type `/`):
@@ -323,8 +361,14 @@ them when you type `/`):
 | --- | --- |
 | `/wake [machine\|all]` | Wake, then report when it's up |
 | `/status [machine\|all]` | 🟢 up / 🔴 down |
-| `/hosts` | Machines and their last state, with Wake / Check buttons |
+| `/hosts` | Machines and their last state; tap one for its screen |
+| `/host <machine>` | One machine's screen: Wake, Check, auto-wake on/off and delay, alerts, pause / resume, wake before maintenance (the buttons edit the message in place) |
 | `/autowake <machine\|all> on\|off [min]` | Auto-wake per machine |
+| `/pause <machine\|all> [2h\|30m\|1d\|up\|off]` | Pause auto-wake and alerts (default 2 h) |
+| `/alerts <machine\|all> on\|off` | Down / back-up alerts |
+| `/maint [<machine> add <days> <HH:MM> <min> \| clear \| wake on\|off]` | Weekly maintenance windows |
+| `/pve [machine] [shutdown\|reboot\|cert\|unpin]` | Proxmox: status, guests, last backups, pending updates, power (below) |
+| `/vm [machine] [<id> start\|shutdown\|reboot\|stop]` | Proxmox VMs and containers, with buttons |
 | `/addhost <name> <mac> [ip] [ports] [broadcast]` | Add or replace a machine |
 | `/sethost <machine> ip\|mac\|ports\|broadcast\|name <value>` | Change one field (e.g. a new DHCP address) |
 | `/delhost <machine>` · `/wol on\|off` | Remove a machine · the global switch |
@@ -351,9 +395,9 @@ them when you type `/`):
 - Commands older than 2 minutes (sent while the AuthKey was off) are ignored,
   so a stale `/wake` never starts a machine later.
 
-**Device screens:** Menu → **Servers** lists the machines (UP / down / ?);
-OK on one gives Wake, Check now and Auto-wake on/off, and the last row is the
-global switch. Menu → **Remote** shows the bot's state and switches the
+**Device screens:** Menu → **Servers** lists the machines (UP / down / ?).
+OK on one gives Wake, Check now, Auto-wake on/off, Alerts on/off and Pause
+2 h / Resume. The last row is the global switch. Menu → **Remote** shows the bot's state and switches the
 notification level, TOTP codes over Telegram and the web page.
 
 **Setup:**
@@ -367,6 +411,9 @@ notification level, TOTP codes over Telegram and the web page.
 
 Console (USB): `wol [list]`, `wol add <name> <mac> [ip|-] [ports] [broadcast]`,
 `wol del|wake|check <machine>`, `wol auto <machine> on|off [min]`,
+`wol alerts <machine> on|off`, `wol pause <machine> 2h|up|off`,
+`wol maint <machine> add sat 00:00 120|clear|wake on|off`, `pve [machine]`,
+`pve guests|cert [machine]`, `pve unpin <machine>`,
 `wol on|off`, `wol reset` (back to `.env`), `tg`, `tg ping` (a verified TLS
 connection to Telegram, no token needed) and `tg sim <command>`, which runs a
 bot command and prints the reply here (testing without Telegram).
@@ -385,6 +432,52 @@ as "certificate verification failed", so `mem` (free heap, largest block,
 loop-stack use) and `tlstest` (a verified connection to the hybrid tunnel
 server, with the chain and mbedTLS's reason on failure) are there to tell
 the two apart.
+
+#### Proxmox
+
+With an API token the bot also talks to Proxmox VE directly:
+
+- `/pve`: uptime, Proxmox version, CPU, load, RAM, disk, every VM and
+  container (running or not), the last backups, pending updates and the next
+  maintenance window, with buttons for Refresh, Guests, Shut down and Reboot.
+- `/vm`: guests as buttons. Each one offers Start, Shut down, Reboot and Stop.
+- Shut down, reboot and stop need a second tap on a "Yes" button. The button
+  only works for that one action, for 2 minutes. After a shutdown, auto-wake
+  and alerts pause until the machine is up again, and the bot tells you once
+  it is off. After a reboot it reports when it is back, or says so if it
+  isn't back within 20 min.
+- At the end of each maintenance window: the backup results, update status
+  and whether the host restarted.
+
+Setup, in the Proxmox web UI or a root shell on the host:
+
+1. Create a token: Datacenter → Permissions → API Tokens → Add (user
+   `root@pam`, token ID e.g. `esp32`). Keep **Privilege Separation** ticked:
+   the token then has only the rights you give it below, not root's.
+2. Give it a role with exactly what the bot uses:
+
+   ```bash
+   pveum role add AuthKey -privs "Sys.Audit Sys.PowerMgmt VM.Audit VM.PowerMgmt"
+   pveum acl modify / -token 'root@pam!esp32' -role AuthKey
+   ```
+
+   The UI way: Datacenter → Permissions → Roles → Create, then Permissions →
+   Add → API Token Permission, path `/`, role `AuthKey`. Leave
+   `Sys.PowerMgmt` / `VM.PowerMgmt` out for a read-only bot.
+3. In `.env`: `PROXMOX_TOKEN_ID=root@pam!esp32`, `PROXMOX_TOKEN=<the secret>`,
+   `PROXMOX_HOST_IP`, `PROXMOX_HOST_PORT` (8006), and optionally
+   `PROXMOX_HOST_URL` (a link shown under `/pve`, e.g. a Cloudflare tunnel).
+   See `.env.example`. Flash, then send `/pve`.
+
+No password is needed or stored, only the token. Proxmox's certificate is
+self-signed, so it is **pinned** instead of checked against a CA: either
+`PROXMOX_FINGERPRINT` (SHA-256, from node → System → Certificates), or the
+certificate seen on the first connection, stored on the device (`/pve cert`
+shows it, so you can compare it with the Proxmox UI). Any other certificate
+is refused before the token is sent. After renewing the certificate, run
+`/pve unpin`, which needs OK on the AuthKey. A Proxmox call takes a few
+seconds and briefly closes the Telegram connection, because only one TLS
+session fits in RAM.
 
 **Server BIOS (F2 at boot), needed for this to work:**
 
@@ -417,8 +510,10 @@ from any browser on the same network, phones included:
 - **Allow this browser** shows "ALLOW WEB ACCESS?" on the OLED; press OK.
   For 12 hours that browser gets the event log, campus Login/Logout and the
   auto-login switch, the passkey and authenticator lists (delete, add an
-  `otpauth://` link) and the phone sign-in box. Sessions live in RAM, are
-  tied to the browser's IP and end on reboot or with **Lock this browser**.
+  `otpauth://` link), the phone sign-in box, the wake-on-LAN machines (Wake,
+  Check, auto-wake, alerts, Pause 2 h, maintenance windows) and the
+  **Firmware** card (see Build & flash). Sessions live in RAM, are tied to the
+  browser's IP and end on reboot or with **Lock this browser**.
 - Codes and secrets are never shown on the page.
 
 ### Backup and restore
@@ -440,12 +535,18 @@ OLED, with the device PIN if one is set. Restoring replaces everything,
 moves the signature counter forward (so sites never see it go back) and
 restarts the device. Keep the file and the passphrase in separate places.
 
+**Reminder:** about once an hour the device compares a fingerprint of what a
+backup would hold (without the sign counter) with the one saved at the last
+export. If passkeys, accounts or paired PCs changed (for a day), or the last
+backup is older than 30 days, the Telegram bot reminds you, at most once a
+week. `status` (and `/info`) shows the state: `Backup: 3 days ago, up to date`.
+
 ### Event log
 
 **Menu → Event log**, `log` on the serial console, or the web page. Each line
 is stamped with the time (or `+M:SS` since boot before the clock is set). The
 log survives reboots, crashes and power cuts. Each boot logs why the last one
-ended (`Boot v2.0.0 (crash)`, `(power on)`, `(restart)`). `log clear` empties it.
+ended (`Boot v2.1.0 (crash)`, `(power on)`, `(restart)`). `log clear` empties it.
 
 ## Serial console
 
@@ -473,6 +574,13 @@ ended (`Boot v2.0.0 (crash)`, `(power on)`, `(restart)`). `log clear` empties it
   for this passkey on your PC gets signed in while the device is unlocked.
 - OTA is **off** unless `OTA_PASSWORD` is set in `.env`. Anyone who can flash
   firmware can read your keys, so use a long random password and trusted WiFi.
+- Firmware upload from the web page needs an approved browser session **and**
+  OK (plus the device PIN, if set) on the AuthKey, after it shows the
+  version. The image isn't signed (that needs secure boot), so only confirm an
+  update you started yourself.
+- The Proxmox token sits in the firmware like the Telegram token. Give it
+  only the role above. The certificate pin means a machine pretending to be
+  `pve` never gets the token.
 - The `test` build (`pio run -e test`) adds console commands that let software
   on the PC approve requests (`approve!` even skips the PIN for backup
   prompts). Use it only for running the tests.
@@ -506,11 +614,11 @@ src/
   fido/                  CTAP 2.0 engine, credential derivation & storage
   transport/ble.*        NimBLE: FIDO BLE service, keyboard, pairing, hybrid adverts
   transport/hybrid.*     caBLE v2: tunnel, Noise KNpsk0, encrypted CTAP
-  net/                   WiFi/NTP/OTA, campus portal login, web page, Telegram bot + wake-on-LAN, root CAs
+  net/                   WiFi/NTP/OTA, campus portal login, web page (+ firmware upload), Telegram bot, wake-on-LAN + monitor, Proxmox API, root CAs
   totp/                  TOTP storage and generation
   ui/                    OLED screens, buttons
   cli/                   USB serial console
-tools/                   PC helpers (QR, walk-away lock, notifications, backup) and tests
+tools/                   PC helpers (QR, walk-away lock, notifications, backup, WiFi flashing) and tests
 android/                 Android app (Kotlin): passkeys over BLE/USB, QR, walk-away lock
 partitions.csv           2 × 1.875 MB OTA slots + 128 KB NVS
 ```

@@ -13,9 +13,12 @@
 #include "totp/totp.h"
 #include "transport/ble.h"
 #include "transport/hybrid.h"
+#include "ui/ui.h"
 #include "util/codec.h"
 
 #include <ESPmDNS.h>
+#include <esp_ota_ops.h>
+#include <esp_task_wdt.h>
 #include <WebServer.h>
 #include <WiFi.h>
 
@@ -337,6 +340,21 @@ static void handleHosts() {
         o += ",\"age\":"; o += age == UINT32_MAX ? -1 : (long)age;
         o += ",\"auto\":"; o += h->autoWake ? "true" : "false";
         o += ",\"autoMin\":"; o += h->autoMin;
+        o += ",\"alerts\":"; o += h->alerts ? "true" : "false";
+        o += ",\"paused\":"; o += wol::paused(i) ? "true" : "false";
+        o += ",\"pausedUntil\":"; o += h->pausedUntil == WOL_PAUSE_UNTIL_UP ? -1L : (long)h->pausedUntil;
+        o += ",\"maint\":[";
+        char w[40];
+        bool first = true;
+        for (const wol::Window& win : h->maint) {
+            if (!win.days) continue;
+            wol::formatWindow(win, w, sizeof(w));
+            if (!first) o += ',';
+            first = false;
+            jstr(o, w);
+        }
+        o += "],\"inMaint\":"; o += wol::inMaintenance(i) ? "true" : "false";
+        o += ",\"maintWake\":"; o += h->maintWake ? "true" : "false";
         o += '}';
     }
     o += "]}";
@@ -375,6 +393,43 @@ static void handleHostAuto() {
     sendJson(200, "{\"ok\":true}");
 }
 
+static void handleHostAlerts() {
+    if (!guard(true)) return;
+    int i = hostParam();
+    if (i < 0) return;
+    wol::setAlerts(i, s_http.arg("on") == "1");
+    sendJson(200, "{\"ok\":true}");
+}
+
+// secs=0 resumes; secs=-1 pauses until the machine is seen up.
+static void handleHostPause() {
+    if (!guard(true)) return;
+    int i = hostParam();
+    if (i < 0) return;
+    long secs = s_http.arg("secs").toInt();
+    if (!wol::pause(i, secs < 0 ? WOL_PAUSE_UNTIL_UP : (uint32_t)secs)) { sendError(409, "the clock isn't set yet"); return; }
+    sendJson(200, "{\"ok\":true}");
+}
+
+// add=<"sat 00:00 120"> or clear=1
+static void handleHostMaint() {
+    if (!guard(true)) return;
+    int i = hostParam();
+    if (i < 0) return;
+    char err[64];
+    if (s_http.hasArg("clear")) {
+        wol::clearWindows(i);
+    } else {
+        wol::Window w;
+        if (!wol::parseWindow(s_http.arg("add").c_str(), &w, err, sizeof(err)) || !wol::addWindow(i, w, err, sizeof(err))) {
+            sendError(400, err);
+            return;
+        }
+    }
+    logEvent("WoL %s maintenance changed (web)", wol::host(i)->name);
+    sendJson(200, "{\"ok\":true}");
+}
+
 static void handleHostSave() {
     if (!guard(true)) return;
     wol::Host h;
@@ -385,7 +440,7 @@ static void handleHostSave() {
         return;
     }
     int old = wol::find(h.name);
-    if (old >= 0) { h.autoWake = wol::host(old)->autoWake; h.autoMin = wol::host(old)->autoMin; }
+    if (old >= 0) wol::copySettings(*wol::host(old), &h);
     if (wol::put(h, err, sizeof(err)) < 0) { sendError(507, err); return; }
     logEvent("WoL host %s saved (web)", h.name);
     sendJson(200, "{\"ok\":true}");
@@ -406,6 +461,188 @@ static void handleWolSwitch() {
     wol::setEnabled(s_http.arg("on") == "1");
     logEvent("WoL %s (web)", wol::enabled() ? "on" : "off");
     sendJson(200, "{\"ok\":true}");
+}
+
+// --- Firmware update -------------------------------------------------------------------------
+//
+// POST /api/update (multipart, a session and X-AuthKey): the .bin is written
+// to the spare app slot while it arrives and checked (ESP32 image header and
+// SHA-256 by esp_ota_end, plus the AuthKey tag below, so a wrong .bin is
+// refused). Nothing changes until OK (and the device PIN, if set) is pressed
+// on the AuthKey, which shows the new version; only then does the device boot
+// the new slot. GET /api/update?id=N polls; GET /api/update shows the
+// running version.
+
+// Every AuthKey firmware carries this tag; an upload without it is refused.
+// The search pattern is stored XOR-ed so this firmware's own copy of it
+// doesn't count as a tag.
+#define FW_TAG_PREFIX "AKFW1|"
+static const char FW_TAG[] = FW_TAG_PREFIX FW_NAME "|" FW_VERSION "|" __DATE__;
+static const uint8_t TAG_X[] = {'A' ^ 0x5A, 'K' ^ 0x5A, 'F' ^ 0x5A, 'W' ^ 0x5A, '1' ^ 0x5A, '|' ^ 0x5A};
+
+static struct {
+    uint8_t  state;          // 0 none, 1 receiving, 2 received, 3 waiting for OK, 4 installed, 5 denied, 6 failed
+    uint32_t ip, id;
+    esp_ota_handle_t handle;
+    const esp_partition_t* part;
+    size_t   size;
+    bool     tagged;
+    char     version[16];
+    char     err[64];
+    uint8_t  tail[40];       // end of the previous chunk (tag across a boundary)
+    size_t   tailLen;
+    uint32_t rebootAtMs;
+} s_up;
+
+static void upFail(const char* why) {
+    if (s_up.state == 1) esp_ota_abort(s_up.handle);
+    s_up.state = 6;
+    strlcpy(s_up.err, why, sizeof(s_up.err));
+    logf("WEB", "firmware upload refused: %s", why);
+}
+
+// Looks for the tag in tail + chunk; reads the version after "AKFW1|<name>|".
+static void scanTag(const uint8_t* p, size_t n) {
+    if (s_up.tagged) return;
+    uint8_t pat[sizeof(TAG_X)];
+    for (size_t k = 0; k < sizeof(pat); k++) pat[k] = TAG_X[k] ^ 0x5A;
+    uint8_t buf[sizeof(s_up.tail) + 80];
+    // Boundary region first (tail + start of this chunk), then the chunk itself.
+    size_t head = n < 80 ? n : 80;
+    memcpy(buf, s_up.tail, s_up.tailLen);
+    memcpy(buf + s_up.tailLen, p, head);
+    const uint8_t* regions[2] = {buf, p};
+    size_t lens[2] = {s_up.tailLen + head, n};
+    for (int r = 0; r < 2 && !s_up.tagged; r++) {
+        const uint8_t* at = regions[r];
+        size_t left = lens[r];
+        while (left >= sizeof(pat)) {
+            const uint8_t* hit = (const uint8_t*)memmem(at, left, pat, sizeof(pat));
+            if (!hit) break;
+            const char* name = (const char*)hit + sizeof(pat);
+            size_t room = regions[r] + lens[r] - (const uint8_t*)name;
+            size_t nameLen = strlen(FW_NAME);
+            if (room > nameLen + 2 && !memcmp(name, FW_NAME "|", nameLen + 1)) {
+                const char* v = name + nameLen + 1;
+                size_t vroom = regions[r] + lens[r] - (const uint8_t*)v, k = 0;
+                while (k < vroom && k < sizeof(s_up.version) - 1 && v[k] != '|' && v[k] >= ' ') { s_up.version[k] = v[k]; k++; }
+                s_up.version[k] = '\0';
+                s_up.tagged = true;
+                break;
+            }
+            left -= hit + 1 - at;
+            at = hit + 1;
+        }
+    }
+    size_t keep = n < sizeof(s_up.tail) ? n : sizeof(s_up.tail);
+    memcpy(s_up.tail, p + n - keep, keep);
+    s_up.tailLen = keep;
+}
+
+static void handleUpload() {
+    HTTPUpload& up = s_http.upload();
+    if (up.status == UPLOAD_FILE_START) {
+        if (s_up.state == 1) esp_ota_abort(s_up.handle);
+        memset(&s_up, 0, sizeof(s_up));
+        if (s_http.header("X-AuthKey") != "1" || !authed()) { upFail("locked"); return; }
+        if (approval::pending()) { upFail("the device is waiting for another confirmation"); return; }
+        s_up.part = esp_ota_get_next_update_partition(nullptr);
+        if (!s_up.part || esp_ota_begin(s_up.part, OTA_SIZE_UNKNOWN, &s_up.handle) != ESP_OK) {
+            s_up.state = 6;
+            strlcpy(s_up.err, "no spare app slot", sizeof(s_up.err));
+            return;
+        }
+        s_up.state = 1;
+        s_up.ip = clientIp();
+        logEvent("Firmware upload (web)");
+        logf("WEB", "firmware upload to %s from %s", s_up.part->label, IPAddress(s_up.ip).toString().c_str());
+    } else if (up.status == UPLOAD_FILE_WRITE) {
+        if (s_up.state != 1) return;
+        if (!s_up.size && up.currentSize && up.buf[0] != 0xE9) { upFail("not an ESP32 firmware .bin"); return; }
+        scanTag(up.buf, up.currentSize);
+        if (esp_ota_write(s_up.handle, up.buf, up.currentSize) != ESP_OK) { upFail("too big for the app slot, or a flash error"); return; }
+        s_up.size += up.currentSize;
+        esp_task_wdt_reset();                       // the whole upload runs inside one loop() pass
+        int total = s_http.clientContentLength();
+        if ((s_up.size & 0xFFFF) < up.currentSize) ui::otaProgress(s_up.size, total > 0 ? total : s_up.size);
+    } else if (up.status == UPLOAD_FILE_END) {
+        if (s_up.state != 1) return;
+        if (!s_up.tagged) { upFail("not AuthKey firmware (tag missing)"); return; }
+        esp_err_t e = esp_ota_end(s_up.handle);
+        if (e != ESP_OK) {
+            s_up.state = 6;
+            strlcpy(s_up.err, e == ESP_ERR_OTA_VALIDATE_FAILED ? "image check failed (damaged or incomplete)" : "write failed",
+                    sizeof(s_up.err));
+            return;
+        }
+        s_up.state = 2;
+        logf("WEB", "firmware v%s received (%u bytes), waiting for OK", s_up.version, (unsigned)s_up.size);
+    } else if (up.status == UPLOAD_FILE_ABORTED) {
+        upFail("upload interrupted");
+    }
+}
+
+static void onFirmwareApproval(bool approved, void*) {
+    if (s_up.state != 3) return;
+    if (!approved) {
+        s_up.state = 5;
+        logEvent("Firmware v%s denied", s_up.version);
+        return;
+    }
+    if (esp_ota_set_boot_partition(s_up.part) != ESP_OK) {
+        s_up.state = 6;
+        strlcpy(s_up.err, "couldn't switch to the new slot", sizeof(s_up.err));
+        return;
+    }
+    s_up.state = 4;
+    logEvent("Firmware v%s installed (web)", s_up.version);
+    s_up.rebootAtMs = (millis() + 3000) | 1;        // time for the browser to hear it
+}
+
+static void handleUploadDone() {
+    if (!guard(true)) { if (s_up.state == 1) esp_ota_abort(s_up.handle); s_up.state = 0; return; }
+    if (s_up.state == 6) { sendError(400, s_up.err); s_up.state = 0; return; }
+    if (s_up.state != 2) { sendError(400, "no firmware received"); return; }
+    char detail[32];
+    snprintf(detail, sizeof(detail), "v%s, %u KB", s_up.version, (unsigned)(s_up.size / 1024));
+    if (!approval::ask("INSTALL FIRMWARE?", detail, "uploaded on the web page", true, onFirmwareApproval, nullptr)) {
+        sendError(409, "the device is busy; try again");
+        s_up.state = 0;
+        return;
+    }
+    crypto::random((uint8_t*)&s_up.id, sizeof(s_up.id));
+    s_up.id &= 0x7FFFFFFF;
+    s_up.state = 3;
+    String o = String("{\"id\":") + s_up.id + ",\"size\":" + s_up.size + ",\"version\":";
+    jstr(o, s_up.version);
+    sendJson(200, o + "}");
+}
+
+static void handleUpdateInfo() {
+    if (!guard(false)) return;
+    if (s_http.hasArg("id")) {
+        uint32_t id = (uint32_t)strtoul(s_http.arg("id").c_str(), nullptr, 10);
+        static const char* const NAMES[] = {"none", "receiving", "received", "waiting", "installed", "denied", "failed"};
+        const char* st = id == s_up.id && s_up.state < 7 ? NAMES[s_up.state] : "expired";
+        if (s_up.state == 3 && !approval::pending()) st = "expired";
+        String o = "{\"state\":";
+        jstr(o, st);
+        o += ",\"error\":";
+        jstr(o, s_up.state == 6 ? s_up.err : "");
+        sendJson(200, o + "}");
+        return;
+    }
+    const esp_partition_t* run = esp_ota_get_running_partition();
+    const esp_partition_t* next = esp_ota_get_next_update_partition(nullptr);
+    String o = "{\"version\":";
+    jstr(o, FW_VERSION);
+    o += ",\"build\":";
+    jstr(o, FW_TAG + sizeof(FW_TAG_PREFIX) - 1 + strlen(FW_NAME) + 1);
+    o += ",\"running\":";
+    jstr(o, run ? run->label : "?");
+    o += ",\"slot\":";
+    o += next ? next->size : 0;
+    sendJson(200, o + "}");
 }
 
 // --- Remote access ------------------------------------------------------------------------
@@ -452,19 +689,29 @@ static void start() {
         s_http.on("/api/hosts/check", HTTP_POST, handleHostCheck);
         s_http.on("/api/hosts/auto", HTTP_POST, handleHostAuto);
         s_http.on("/api/hosts/save", HTTP_POST, handleHostSave);
+        s_http.on("/api/hosts/alerts", HTTP_POST, handleHostAlerts);
+        s_http.on("/api/hosts/pause", HTTP_POST, handleHostPause);
+        s_http.on("/api/hosts/maint", HTTP_POST, handleHostMaint);
         s_http.on("/api/hosts/delete", HTTP_POST, handleHostDelete);
         s_http.on("/api/wol", HTTP_POST, handleWolSwitch);
         s_http.on("/api/remote", HTTP_GET, handleRemote);
         s_http.on("/api/remote", HTTP_POST, handleRemoteSet);
+        s_http.on("/api/update", HTTP_GET, handleUpdateInfo);
+        s_http.on("/api/update", HTTP_POST, handleUploadDone, handleUpload);
         s_http.onNotFound([]() { sendError(404, "not found"); });
     }
     s_http.begin();
     MDNS.addService("http", "tcp", 80);
     s_started = true;
-    logf("WEB", "management page at http://%s/ (authkey-esp32.local)", network::ip().c_str());
+    logf("WEB", "management page at http://%s/ (authkey-esp32.local), firmware %s", network::ip().c_str(), FW_TAG);
 }
 
 void loop() {
+    if (s_up.rebootAtMs && (int32_t)(millis() - s_up.rebootAtMs) >= 0) {
+        logFlush();
+        delay(200);
+        ESP.restart();
+    }
     if (!settings::webPage()) {
         if (s_started) { s_http.stop(); s_started = false; logf("WEB", "web page off"); }
         return;

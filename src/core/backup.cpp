@@ -5,9 +5,13 @@
 #include "core/settings.h"
 #include "crypto/crypto.h"
 #include "fido/credentials.h"
+#include "net/network.h"
 #include "totp/totp.h"
 #include "unlock/unlock.h"
 #include "util/codec.h"
+
+#include <Preferences.h>
+#include <mbedtls/sha256.h>
 
 namespace backup {
 
@@ -29,11 +33,15 @@ static uint8_t  s_nonce[12];
 static uint8_t* s_buf = nullptr;     // restore: ciphertext, then plaintext
 static size_t   s_len = 0, s_have = 0;
 
+// Writes into a buffer, or (p == nullptr) only feeds a SHA-256: the backup
+// reminder fingerprints the same data without a 10 KB buffer.
 struct Writer {
     uint8_t* p; size_t n, cap; bool ok = true;
+    mbedtls_sha256_context* sha = nullptr;
     void put(const void* d, size_t l) {
         if (n + l > cap) { ok = false; return; }
-        memcpy(p + n, d, l);
+        if (sha) mbedtls_sha256_update_ret(sha, (const uint8_t*)d, l);
+        else memcpy(p + n, d, l);
         n += l;
     }
     void u8(uint8_t v) { put(&v, 1); }
@@ -74,15 +82,16 @@ static void summary(int passkeys, int totps, int pcs, char* out, size_t cap) {
 
 // --- Export ------------------------------------------------------------------
 
-static size_t buildPlain(uint8_t* out, size_t cap) {
+static size_t buildPlain(uint8_t* out, size_t cap, mbedtls_sha256_context* sha = nullptr) {
     Writer w{out, 0, cap};
+    w.sha = sha;
     w.put(MAGIC, 4);
     w.u16(VERSION);
     w.u16(sizeof(ResidentCredential));
     w.u16(sizeof(TotpAccount));
     w.u16(sizeof(unlock::PcEntry));
     w.put(settings::masterKey(), 32);
-    w.u32(settings::signCount());
+    w.u32(sha ? 0 : settings::signCount());   // the counter changes with every sign-in: not in the fingerprint
 
     // Passkeys oldest first, so a restore keeps the same "newest = default" order.
     int slots[FIDO_MAX_RESIDENT], created[FIDO_MAX_RESIDENT], n = 0;
@@ -119,6 +128,39 @@ static size_t buildPlain(uint8_t* out, size_t cap) {
     }
     crypto::wipe(&pc, sizeof(pc));
     return w.ok ? w.n : 0;
+}
+
+// --- Reminder state ---------------------------------------------------------------
+// NVS "bk": at = time of the last export (UTC), hash = what it held, chg =
+// when a difference was first seen, nag = last reminder.
+static Preferences s_bk;
+static bool        s_bkOpen = false;
+static void openPrefs() { if (!s_bkOpen) s_bkOpen = s_bk.begin("bk", false); }
+
+// Fingerprint of everything a backup holds, without the signature counter
+// (it changes with every sign-in).
+static bool stateHash(uint8_t out[16]) {
+    mbedtls_sha256_context sha;
+    mbedtls_sha256_init(&sha);
+    mbedtls_sha256_starts_ret(&sha, 0);
+    size_t n = buildPlain(nullptr, MAX_PLAIN, &sha);
+    uint8_t h[32];
+    mbedtls_sha256_finish_ret(&sha, h);
+    mbedtls_sha256_free(&sha);
+    if (!n) return false;
+    memcpy(out, h, 16);
+    crypto::wipe(h, sizeof(h));
+    return true;
+}
+
+static void recordExport() {
+    openPrefs();
+    uint8_t h[16];
+    if (stateHash(h)) s_bk.putBytes("hash", h, 16);
+    time_t now = network::now();
+    s_bk.putUInt("at", now ? (uint32_t)now : 1);   // 1 = backed up, time unknown
+    s_bk.remove("chg");
+    s_bk.remove("nag");
 }
 
 static void onExport(bool approved, void*) {
@@ -158,6 +200,7 @@ static void onExport(bool approved, void*) {
     free(sealed);
     consolef("OK backup %u bytes\n", (unsigned)total);
     logEvent("Backup exported");
+    recordExport();
 }
 
 void exportStart(const uint8_t key[32]) {
@@ -275,6 +318,83 @@ void restoreEnd() {
         return;
     }
     consoleWrite("WAIT confirm on the device\n");
+}
+
+// --- Reminder -------------------------------------------------------------------
+
+static ReminderFn s_remind = nullptr;
+static uint32_t   s_nextCheckMs = 120000;      // first look two minutes after boot
+
+void setReminder(ReminderFn fn) { s_remind = fn; }
+
+static String ago(uint32_t secs) {
+    uint32_t d = secs / 86400;
+    if (d >= 1) return String(d) + (d == 1 ? " day" : " days") + " ago";
+    return String(secs / 3600) + " h ago";
+}
+
+// 0 = up to date, 1 = never, 2 = changed, 3 = old, -1 = can't tell.
+// `age` = seconds since the last export.
+static int verdict(uint32_t* age, bool* timeKnown) {
+    openPrefs();
+    time_t now = network::now();
+    uint32_t at = s_bk.getUInt("at", 0);
+    *timeKnown = at > 1 && now;
+    *age = *timeKnown ? now - at : 0;
+    uint8_t h[16], saved[16];
+    bool have = s_bk.isKey("hash") && s_bk.getBytes("hash", saved, 16) == 16;
+    if (!stateHash(h)) return -1;
+    bool changed = !have || !crypto::equal(h, saved, 16);
+    uint32_t chg = s_bk.getUInt("chg", 0);
+    if (changed && !chg && now) s_bk.putUInt("chg", (uint32_t)now);
+    if (!changed && chg) s_bk.remove("chg");
+    if (!at) return 1;
+    if (changed) return 2;
+    if (*timeKnown && *age > 30UL * 86400) return 3;
+    return 0;
+}
+
+void describe(char* out, size_t cap) {
+    if (!creds::residentCount() && !totp::count() && !unlock::count()) { snprintf(out, cap, "nothing to back up"); return; }
+    uint32_t age;
+    bool known;
+    int v = verdict(&age, &known);
+    String when = known ? ago(age) : String("time unknown");
+    switch (v) {
+        case 1:  snprintf(out, cap, "none recorded (tools/authkey.py backup <file>)"); break;
+        case 2:  snprintf(out, cap, "%s, CHANGED since (new passkeys / accounts)", when.c_str()); break;
+        case 3:  snprintf(out, cap, "%s (older than 30 days)", when.c_str()); break;
+        case 0:  snprintf(out, cap, "%s, up to date", when.c_str()); break;
+        default: snprintf(out, cap, "can't tell"); break;
+    }
+}
+
+void loop() {
+    if (!s_remind || (int32_t)(millis() - s_nextCheckMs) < 0) return;
+    s_nextCheckMs = millis() + 3600000UL;
+    time_t now = network::now();
+    if (!now) { s_nextCheckMs = millis() + 60000; return; }
+    if (!creds::residentCount() && !totp::count() && !unlock::count()) return;
+    uint32_t age;
+    bool known;
+    int v = verdict(&age, &known);
+    if (v <= 0) return;
+    uint32_t chg = s_bk.getUInt("chg", 0);
+    if ((v == 1 || v == 2) && chg && now - chg < 86400) return;   // give a day to finish adding things
+    uint32_t nag = s_bk.getUInt("nag", 0);
+    if (nag && now - nag < 7UL * 86400) return;
+    s_bk.putUInt("nag", (uint32_t)now);
+    char what[48];
+    summary(creds::residentCount(), totp::count(), unlock::count(), what, sizeof(what));
+    String msg = "💾 Backup reminder: ";
+    if (v == 1) msg += "no backup of this AuthKey is recorded yet";
+    else if (v == 2) msg += String("passkeys or accounts changed since the last backup (") + (known ? ago(age) : String("date unknown")) + ")";
+    else msg += String("the last backup was ") + ago(age);
+    msg += String(".\nIt holds ") + what + ". If the AuthKey is lost or breaks, they are gone without one.\n"
+           "On the PC, with the AuthKey on USB:\n  python tools/authkey.py backup authkey-backup.json\n"
+           "(Next reminder in a week at the earliest.)";
+    logf("BACKUP", "reminder sent (%d)", v);
+    s_remind(msg.c_str());
 }
 
 }  // namespace backup

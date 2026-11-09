@@ -10,7 +10,7 @@
 #include "authkey_secrets.h"
 
 #define FW_NAME     "AuthKey-ESP32"
-#define FW_VERSION  "2.0.0"
+#define FW_VERSION  "2.1.0"
 
 // --- Pins --------------------------------------------------------------------
 #define PIN_SDA         21
@@ -72,7 +72,7 @@
 // WOL_2_..., like the WiFi list) on first boot or `wol reset`, and can be
 // added / changed later from Telegram, the web page or the console (kept in
 // NVS). Without any in .env, this default is used:
-#define WOL_DEFAULT_HOST        {"pve", "64:00:6a:2b:36:9f", "172.16.114.175", "8006,22", "172.16.119.255"}
+#define WOL_DEFAULT_HOST        {"pve", "64:00:6a:2b:36:9f", "172.16.114.175", "8006,22", "172.16.119.255", ""}
 #define WOL_MAX_HOSTS           8
 #define WOL_UDP_PORT            9
 #define WOL_CONNECT_TIMEOUT_MS  1500               // per port: a check blocks at most ~3 s
@@ -82,6 +82,8 @@
 #define WOL_AUTO_CHECK_SECS     60                 // auto-wake: how often each host is looked at
 #define WOL_AUTO_DEFAULT_MIN    10                 // auto-wake: down this long -> wake
 #define WOL_AUTO_MAX_TRIES      3                  // then wait until it is seen up again
+#define WOL_MAINT_PREWAKE_MIN   5                  // wake this long before a maintenance window
+#define WOL_RESTART_WAIT_MIN    20                 // a reboot from Telegram should be back by then
 
 // --- Telegram bot ------------------------------------------------------------
 // Token and allowed chat IDs come from .env (TELEGRAM_BOT_TOKEN / _CHAT_ID).

@@ -8,8 +8,10 @@
 #include "fido/ctap2.h"
 #include "net/network.h"
 #include "net/portal.h"
+#include "net/proxmox.h"
 #include "net/telegram_ca.h"
 #include "net/wol.h"
+#include "core/backup.h"
 #include "totp/totp.h"
 #include "transport/hybrid.h"
 
@@ -28,13 +30,14 @@ namespace telegram {
 #define SEND_STALL_MS   15000UL
 
 enum class St : uint8_t { Off, Idle, Polling, Sending };
-enum class Out : uint8_t { Message, Answer, Commands };
+enum class Out : uint8_t { Message, Edit, Answer, Commands };
 
 struct Outgoing {
     Out       type;
     long long chat;
     String    text;      // message text / setMyCommands body
     String    extra;     // reply_markup JSON / callback query id
+    long      msgId;     // Edit: the message to replace
 };
 
 static St               s_state = St::Off;
@@ -109,7 +112,7 @@ static void backOff(uint32_t fixedSecs = 0) {
 
 static bool s_sim = false;                       // replies go to the console (tg sim)
 
-static void push(Out type, long long chat, const String& text, const String& extra) {
+static void push(Out type, long long chat, const String& text, const String& extra, long msgId = 0) {
     if (s_outCount == OUTBOX) {                  // drop the oldest
         s_out[s_outHead].text = String();
         s_out[s_outHead].extra = String();
@@ -121,6 +124,7 @@ static void push(Out type, long long chat, const String& text, const String& ext
     o.chat = chat;
     o.text = text;
     o.extra = extra;
+    o.msgId = msgId;
     s_outCount++;
 }
 
@@ -136,8 +140,24 @@ static void reply(long long chat, String text, const String& markup = String()) 
     push(Out::Message, chat, text, markup);
 }
 
+// A "screen" (machine details, switches): edits the message whose button was
+// pressed instead of adding a new one.
+static long s_editMsg = 0;
+static void view(long long chat, String text, const String& markup) {
+    if (!s_editMsg || s_sim) { reply(chat, text, markup); return; }
+    if (text.length() > 3800) { text.remove(3800); text += "\n…"; }
+    push(Out::Edit, chat, text, markup, s_editMsg);
+}
+
 void notify(const char* text) {
     for (int i = 0; i < s_chatCount; i++) push(Out::Message, s_chats[i], text, String());
+}
+
+static int s_notifyLevel = 1;
+// Alerts (server down / up, maintenance, backup reminders): muted by /notify off.
+static void alertNotify(const char* text) {
+    if (s_notifyLevel > 0) notify(text);
+    else logf("TG", "alert not sent (notifications off)");
 }
 
 // Inline keyboard: two buttons per row; a button sends its command back.
@@ -161,7 +181,6 @@ struct Buttons {
 // --- Settings kept by the bot ------------------------------------------------------------
 
 static Preferences s_prefs;
-static int  s_notifyLevel = 1;
 static bool s_remoteCodes = false;
 
 int  notifyLevel() { return s_notifyLevel; }
@@ -229,6 +248,8 @@ static String hostLine(int i) {
     if (wol::waking(i)) s += " waking";
     else if (age != UINT32_MAX) s += String(", checked ") + (age < 120 ? String(age) + " s" : String(age / 60) + " min") + " ago";
     if (h->autoWake) s += String(", auto-wake ") + h->autoMin + " min";
+    if (wol::paused(i)) s += ", ⏸ paused";
+    if (wol::inMaintenance(i)) s += ", 🛠 maintenance";
     return s;
 }
 
@@ -296,6 +317,8 @@ static void cmdMenu(long long chat, char*) {
     b.add("🖥 Machines", "/hosts");
     for (int i = 0; i < wol::count(); i++) b.add(String("⏰ Wake ") + wol::host(i)->name, String("/wake ") + wol::host(i)->name);
     b.newRow();
+    if (proxmox::count()) b.add("📊 Proxmox", "/pve");
+    if (proxmox::count()) b.add("🧩 VMs / containers", "/vm");
     b.add("ℹ️ Device info", "/info");
     b.add("📜 Event log", "/log");
     b.add("🌐 Campus login", "/portal login");
@@ -311,10 +334,11 @@ static void cmdHosts(long long chat, char*) {
     Buttons b;
     for (int i = 0; i < wol::count(); i++) {
         s += String(i + 1) + ". " + hostLine(i) + "\n";
-        b.add(String("⏰ ") + wol::host(i)->name, String("/wake ") + wol::host(i)->name);
-        b.add(String("🔎 ") + wol::host(i)->name, String("/status ") + wol::host(i)->name);
+        b.add(String("🖥 ") + wol::host(i)->name + " ›", String("/host ") + wol::host(i)->name);
+        b.add(String("⏰ Wake ") + wol::host(i)->name, String("/wake ") + wol::host(i)->name);
     }
-    reply(chat, s, b.json());
+    s += "\nTap a machine for auto-wake, alerts, pause and maintenance.";
+    view(chat, s, b.json());
 }
 
 static void cmdWake(long long chat, char* arg) {
@@ -434,8 +458,7 @@ static void cmdSethost(long long chat, char* arg) {
         reply(chat, String("Not changed: ") + err);
         return;
     }
-    n.autoWake = h.autoWake;
-    n.autoMin = h.autoMin;
+    wol::copySettings(h, &n);
     if (strcasecmp(n.name, h.name)) wol::remove(i);          // renamed: replace the entry
     int j = wol::put(n, err, sizeof(err));
     if (j < 0) { reply(chat, String("Not changed: ") + err); return; }
@@ -567,11 +590,401 @@ static void cmdCmd(long long chat, char* arg) {
     runConsole(chat, arg);
 }
 
+// --- Machine screen: auto-wake, alerts, pause, maintenance --------------------------------
+
+static String fmtWhen(time_t t) {
+    if (!t) return "?";
+    char b[20];
+    struct tm lt;
+    localtime_r(&t, &lt);
+    strftime(b, sizeof(b), "%a %d %b %H:%M", &lt);
+    return b;
+}
+
+static String fmtIn(long s) {
+    if (s < 0) s = 0;
+    if (s < 3600) return String(s / 60) + " min";
+    if (s < 2 * 86400) return String(s / 3600) + " h " + (s % 3600 / 60) + " min";
+    return String(s / 86400) + " d " + (s % 86400 / 3600) + " h";
+}
+
+static String windowsText(int i) {
+    const wol::Host* h = wol::host(i);
+    String s;
+    char w[40];
+    for (const wol::Window& win : h->maint) {
+        if (!win.days) continue;
+        wol::formatWindow(win, w, sizeof(w));
+        if (s.length()) s += "; ";
+        s += w;
+    }
+    return s;
+}
+
+static String pauseText(int i) {
+    const wol::Host* h = wol::host(i);
+    if (!wol::paused(i)) return String();
+    if (h->pausedUntil == WOL_PAUSE_UNTIL_UP) return "until it is up again";
+    return "until " + fmtWhen(h->pausedUntil);
+}
+
+static void showHost(long long chat, int i) {
+    const wol::Host* h = wol::host(i);
+    char mac[18];
+    wol::formatMac(h->mac, mac, sizeof(mac));
+    int st = wol::lastState(i);
+    String s = String("🖥 ") + h->name + "  " +
+               (wol::waking(i) ? "⏳ waking" : st > 0 ? "🟢 up" : st == 0 ? "🔴 down" : "⚪ not checked yet");
+    time_t since = wol::stateSince(i), now = network::now();
+    if (since && now && st >= 0) s += " for " + fmtIn(now - since);
+    s += String("\n") + (h->ip[0] ? h->ip : "no IP") + " · " + mac + " · ports " + h->ports[0] +
+         (h->ports[1] ? String(",") + h->ports[1] : String()) + "\n\n";
+    s += String("⏰ Auto-wake: ") + (h->autoWake ? String("on, after ") + h->autoMin + " min unreachable" : String("off")) + "\n";
+    s += String("🔔 Alerts (down / back up): ") + (h->alerts ? "on" : "off") + "\n";
+    String p = pauseText(i);
+    if (p.length()) s += "⏸ Paused " + p + "\n";
+    String w = windowsText(i);
+    if (w.length()) {
+        s += "🛠 Maintenance: " + w +
+             (h->maintWake ? String(" (wakes it ") + WOL_MAINT_PREWAKE_MIN + " min before)" : String(" (no wake before)")) + "\n";
+        time_t next = wol::nextWindow(i);
+        if (wol::inMaintenance(i)) s += "   ➜ in a window right now\n";
+        else if (next && now) s += "   ➜ next: " + fmtWhen(next) + " (in " + fmtIn(next - now) + ")\n";
+    } else {
+        s += String("🛠 Maintenance: none (/maint ") + h->name + " add sat 00:00 120)\n";
+    }
+    if (!wol::enabled()) s += "\n⚠️ Wake-on-LAN is off for all machines (/wol on).";
+
+    String n = h->name;
+    Buttons b;
+    b.add("⏰ Wake", "/wake " + n);
+    b.add("🔎 Check", "/status " + n);
+    b.add(h->autoWake ? "✅ Auto-wake on" : "⬜ Auto-wake off", "/host " + n + (h->autoWake ? " auto off" : " auto on"), 1);
+    b.newRow();
+    for (int m : {5, 10, 30, 60})
+        b.add(String(h->autoWake && h->autoMin == m ? "• " : "") + m + " min", "/host " + n + " delay " + m, 4);
+    b.newRow();
+    b.add(h->alerts ? "🔔 Alerts on" : "🔕 Alerts off", "/host " + n + (h->alerts ? " alerts off" : " alerts on"));
+    if (wol::paused(i)) b.add("▶️ Resume", "/host " + n + " resume");
+    else b.add("⏸ Pause 2 h", "/host " + n + " pause 2h");
+    if (w.length())
+        b.add(h->maintWake ? "✅ Wake before maintenance" : "⬜ Wake before maintenance",
+              "/host " + n + (h->maintWake ? " maintwake off" : " maintwake on"), 1);
+    b.newRow();
+    if (proxmox::forHost(i) >= 0) b.add("📊 Proxmox", "/pve " + n);
+    b.add("🔄 Refresh", "/host " + n);
+    b.add("« Machines", "/hosts");
+    view(chat, s, b.json());
+}
+
+// /host <machine> [auto on|off | delay <min> | alerts on|off | pause <2h> | resume | maintwake on|off]
+static void cmdHost(long long chat, char* arg) {
+    char* who = strtok(arg, " ");
+    char* what = strtok(nullptr, " ");
+    char* value = strtok(nullptr, " ");
+    if (!who) {
+        char none[1] = "";
+        cmdHosts(chat, none);
+        return;
+    }
+    int i = hostArg(chat, who);
+    if (i < 0) return;
+    const wol::Host* h = wol::host(i);
+    if (what) {
+        bool on = value && !strcasecmp(value, "on");
+        if (!strcasecmp(what, "auto") && value) wol::setAutoWake(i, on);
+        else if (!strcasecmp(what, "delay") && value && atoi(value) > 0) wol::setAutoWake(i, true, atoi(value));
+        else if (!strcasecmp(what, "alerts") && value) wol::setAlerts(i, on);
+        else if (!strcasecmp(what, "maintwake") && value) wol::setMaintWake(i, on);
+        else if (!strcasecmp(what, "resume")) wol::pause(i, 0);
+        else if (!strcasecmp(what, "pause")) {
+            uint32_t secs = value && !strcasecmp(value, "up") ? WOL_PAUSE_UNTIL_UP : wol::parseDuration(value ? value : "2h");
+            if (!secs || !wol::pause(i, secs)) { reply(chat, "Pause for how long? e.g. 2h, 30m, 1d (the clock must be set)."); return; }
+        } else {
+            reply(chat, "Usage: /host <machine> [auto on|off | delay <min> | alerts on|off | pause <2h|up> | resume | maintwake on|off]");
+            return;
+        }
+        logEvent("Remote: %s %s %s", h->name, what, value ? value : "");
+    }
+    showHost(chat, i);
+}
+
+static void forHosts(long long chat, const char* who, void (*fn)(int)) {
+    if (!strcasecmp(who, "all")) { for (int i = 0; i < wol::count(); i++) fn(i); return; }
+    int i = hostArg(chat, who);
+    if (i >= 0) fn(i);
+}
+
+static uint32_t s_pauseSecs;
+static bool     s_alertsOn;
+
+// /pause <machine|all> [2h|30m|1d|up|off]
+static void cmdPause(long long chat, char* arg) {
+    char* who = strtok(arg, " ");
+    char* len = strtok(nullptr, " ");
+    if (!who) {
+        String s = "Pause auto-wake and alerts for a machine (maintenance, tinkering):\n";
+        for (int i = 0; i < wol::count(); i++) {
+            String p = pauseText(i);
+            s += String(wol::host(i)->name) + ": " + (p.length() ? "paused " + p : String("not paused")) + "\n";
+        }
+        reply(chat, s + "/pause <machine|all> 2h · 30m · 1d · up (until it is up again) · off");
+        return;
+    }
+    s_pauseSecs = !len ? 7200 : !strcasecmp(len, "off") ? 0 : !strcasecmp(len, "up") ? WOL_PAUSE_UNTIL_UP : wol::parseDuration(len);
+    if (len && strcasecmp(len, "off") && !s_pauseSecs) { reply(chat, "Length like 2h, 30m, 1d, up or off."); return; }
+    if (s_pauseSecs && s_pauseSecs != WOL_PAUSE_UNTIL_UP && !network::now()) {
+        reply(chat, "The AuthKey's clock isn't set yet; use /pause <machine> up.");
+        return;
+    }
+    forHosts(chat, who, [](int i) { wol::pause(i, s_pauseSecs); });
+    logEvent("Remote: pause %s %s", who, len ? len : "2h");
+    String s;
+    for (int i = 0; i < wol::count(); i++) {
+        String p = pauseText(i);
+        s += String(wol::host(i)->name) + ": " + (p.length() ? "⏸ paused " + p : String("▶️ active")) + "\n";
+    }
+    reply(chat, s);
+}
+
+// /alerts <machine|all> on|off
+static void cmdAlerts(long long chat, char* arg) {
+    char* who = strtok(arg, " ");
+    char* onoff = strtok(nullptr, " ");
+    if (who && onoff && (!strcasecmp(onoff, "on") || !strcasecmp(onoff, "off"))) {
+        s_alertsOn = !strcasecmp(onoff, "on");
+        forHosts(chat, who, [](int i) { wol::setAlerts(i, s_alertsOn); });
+        logEvent("Remote: alerts %s %s", who, onoff);
+    }
+    String s = "Down / back-up alerts (\"down\" = 2 missed checks in a row, about 2 min):\n";
+    for (int i = 0; i < wol::count(); i++) s += String(wol::host(i)->name) + ": " + (wol::host(i)->alerts ? "on" : "off") + "\n";
+    s += String("Notifications: ") + notifyLevelName(s_notifyLevel) + (s_notifyLevel ? "" : " (alerts muted: /notify important)");
+    reply(chat, s + "\n/alerts <machine|all> on|off");
+}
+
+// /maint [<machine> add <days> <HH:MM> <min> | clear | wake on|off]
+static void cmdMaint(long long chat, char* arg) {
+    char* who = strtok(arg, " ");
+    char* what = strtok(nullptr, " ");
+    char* rest = strtok(nullptr, "");
+    if (who && what) {
+        int i = hostArg(chat, who);
+        if (i < 0) return;
+        char err[64];
+        wol::Window w;
+        if (!strcasecmp(what, "add")) {
+            if (!wol::parseWindow(rest, &w, err, sizeof(err)) || !wol::addWindow(i, w, err, sizeof(err))) {
+                reply(chat, String("Not added: ") + err);
+                return;
+            }
+        } else if (!strcasecmp(what, "clear")) {
+            wol::clearWindows(i);
+        } else if (!strcasecmp(what, "wake") && rest) {
+            wol::setMaintWake(i, !strncasecmp(rest, "on", 2));
+        } else {
+            reply(chat, "Usage: /maint <machine> add <days> <HH:MM> <minutes> | clear | wake on|off");
+            return;
+        }
+        logEvent("Remote: maint %s %s", wol::host(i)->name, what);
+        showHost(chat, i);
+        return;
+    }
+    String s = "Maintenance windows (weekly, local time). The AuthKey wakes the machine a few minutes "
+               "before if it is off, keeps quiet about restarts inside the window and reports when it ends";
+    s += proxmox::count() ? " (with Proxmox: backups, updates, restarts).\n\n" : ".\n\n";
+    for (int i = 0; i < wol::count(); i++) {
+        String w = windowsText(i);
+        s += String(wol::host(i)->name) + ": " + (w.length() ? w : String("none")) + "\n";
+    }
+    s += "\n/maint <machine> add sat 00:00 120\n/maint <machine> add sun 00:00 2h\n/maint <machine> clear · wake on|off\n"
+         "Days: sun..sat, sat,sun, mon-fri, daily, weekend.";
+    reply(chat, s);
+}
+
+// --- Proxmox -------------------------------------------------------------------------------
+
+// Two-step confirmation for power actions: the button carries a short code
+// that is valid for 2 minutes and for that one action.
+static struct { uint16_t code; uint32_t untilMs; String what; } s_confirm;
+
+static String confirmCode(const String& what) {
+    s_confirm.code = 1000 + esp_random() % 9000;
+    s_confirm.untilMs = millis() + 120000;
+    s_confirm.what = what;
+    return String(s_confirm.code);
+}
+
+static bool confirmed(const String& what, const char* code) {
+    bool ok = code && s_confirm.code && atoi(code) == s_confirm.code && s_confirm.what == what &&
+              (int32_t)(millis() - s_confirm.untilMs) < 0;
+    if (ok) s_confirm.code = 0;
+    return ok;
+}
+
+static bool pveBusy(long long chat) {
+    if (ctap::busy() || hybrid::state() != hybrid::State::Idle) {
+        reply(chat, "The AuthKey is busy with a sign-in; try again in a moment.");
+        return true;
+    }
+    return false;
+}
+
+// Config index from the first word if it names a Proxmox machine, else the first server.
+static int pveArg(long long chat, char** words, int* n) {
+    if (!proxmox::count()) {
+        reply(chat, "No Proxmox server set up. Add PROXMOX_TOKEN_ID and PROXMOX_TOKEN to .env and flash (README: Proxmox).");
+        return -1;
+    }
+    if (*n && !isdigit((unsigned char)words[0][0])) {
+        static const char* const VERBS[] = {"shutdown", "reboot", "cert", "unpin"};
+        for (const char* v : VERBS) if (!strcasecmp(words[0], v)) return 0;
+        int c = proxmox::find(words[0]);
+        if (c < 0) { reply(chat, String("No Proxmox server \"") + words[0] + "\"."); return -1; }
+        for (int k = 1; k < *n; k++) words[k - 1] = words[k];
+        (*n)--;
+        return c;
+    }
+    return 0;
+}
+
+// /pve [machine] [shutdown|reboot [code] | unpin | cert]
+static void cmdPve(long long chat, char* arg) {
+    char* words[4];
+    int n = 0;
+    for (char* t = strtok(arg, " "); t && n < 4; t = strtok(nullptr, " ")) words[n++] = t;
+    int c = pveArg(chat, words, &n);
+    if (c < 0) return;
+    String m = proxmox::machine(c);
+    int host = wol::find(m.c_str());
+    const char* what = n ? words[0] : "";
+    if (!strcasecmp(what, "cert")) { reply(chat, m + " certificate: " + proxmox::pinInfo(c)); return; }
+    if (!strcasecmp(what, "unpin")) { runConsole(chat, "pve unpin " + m); return; }
+    if (!strcasecmp(what, "shutdown") || !strcasecmp(what, "reboot")) {
+        bool off = !strcasecmp(what, "shutdown");
+        String action = String(off ? "shutdown " : "reboot ") + m;
+        if (!confirmed(action, n > 1 ? words[1] : nullptr)) {
+            Buttons b;
+            b.add(String(off ? "⏻ Yes, shut down " : "🔁 Yes, reboot ") + m,
+                  "/pve " + m + (off ? " shutdown " : " reboot ") + confirmCode(action), 1);
+            b.add("Cancel", "/pve " + m, 1);
+            reply(chat,
+                  off ? "Shut down " + m + "? Its running VMs and containers are shut down first. "
+                        "Auto-wake stays paused until you wake it again."
+                      : "Reboot " + m + "? Running guests restart with it.",
+                  b.json());
+            return;
+        }
+        if (pveBusy(chat)) return;
+        String out;
+        bool ok = proxmox::nodePower(c, off ? "shutdown" : "reboot", out);
+        if (ok && host >= 0) {
+            if (off) {
+                wol::expectShutdown(host, "shut down from Telegram");
+                out += "\nI'll tell you when it is off. Auto-wake and alerts are paused until it is up again (/wake " + m + ").";
+            } else {
+                wol::expectRestart(host);
+                out += "\nI'll tell you when it is back.";
+            }
+        }
+        reply(chat, out);
+        return;
+    }
+    if (*what) { reply(chat, "Usage: /pve [machine] [shutdown | reboot | cert | unpin]"); return; }
+    if (pveBusy(chat)) return;
+    String out;
+    proxmox::summary(c, out);
+    if (!out.endsWith("\n")) out += "\n";
+    if (host >= 0) {
+        time_t next = wol::nextWindow(host), now = network::now();
+        if (next && now) out += "🛠 Next maintenance: " + fmtWhen(next) + " (in " + fmtIn(next - now) + ")\n";
+    }
+    Buttons b;
+    b.add("🔄 Refresh", "/pve " + m);
+    b.add("🧩 Guests", "/vm " + m);
+    b.add("⏻ Shut down", "/pve " + m + " shutdown");
+    b.add("🔁 Reboot", "/pve " + m + " reboot");
+    if (host >= 0) b.add(String("🖥 ") + m + " settings", "/host " + m, 1);
+    view(chat, out, b.json());
+}
+
+// /vm [machine] [<vmid> [start|shutdown|reboot|stop [code]]]
+static void cmdVm(long long chat, char* arg) {
+    char* words[5];
+    int n = 0;
+    for (char* t = strtok(arg, " "); t && n < 5; t = strtok(nullptr, " ")) words[n++] = t;
+    int c = pveArg(chat, words, &n);
+    if (c < 0) return;
+    String m = proxmox::machine(c);
+    int vmid = n ? atoi(words[0]) : 0;
+    const char* action = n > 1 ? words[1] : "";
+    if (*action) {
+        bool known = !strcasecmp(action, "start") || !strcasecmp(action, "shutdown") || !strcasecmp(action, "reboot") ||
+                     !strcasecmp(action, "stop");
+        if (!known) { reply(chat, "Action: start, shutdown, reboot or stop"); return; }
+        String key = String(action) + " " + m + " " + vmid;
+        if (strcasecmp(action, "start") && !confirmed(key, n > 2 ? words[2] : nullptr)) {
+            Buttons b;
+            b.add(String("Yes, ") + action + " " + vmid, "/vm " + m + " " + vmid + " " + action + " " + confirmCode(key), 1);
+            b.add("Cancel", "/vm " + m + " " + vmid, 1);
+            reply(chat, String(action) + " guest " + vmid + " on " + m + "?" +
+                        (!strcasecmp(action, "stop") ? " Stop is a hard power-off (like pulling the plug)." : ""),
+                  b.json());
+            return;
+        }
+        if (pveBusy(chat)) return;
+        String out;
+        proxmox::guestPower(c, vmid, action, out);
+        reply(chat, out);
+        return;
+    }
+    if (pveBusy(chat)) return;
+    proxmox::Guest g[24];
+    int count = 0;
+    String err;
+    if (!proxmox::guests(c, g, 24, &count, err) && !count) { reply(chat, "❌ " + err); return; }
+    if (!n) {
+        String s = String("Guests on ") + m + ":\n";
+        Buttons b;
+        for (int i = 0; i < count; i++) {
+            s += String(g[i].running ? "🟢 " : "⚪ ") + g[i].vmid + " " + g[i].name + (g[i].lxc ? " (CT)" : "") + "\n";
+            b.add(String(g[i].running ? "🟢 " : "⚪ ") + g[i].vmid + " " + g[i].name, "/vm " + m + " " + g[i].vmid);
+        }
+        if (!count) s += "(none)\n";
+        s += err;
+        b.add("🔄 Refresh", "/vm " + m);
+        b.add("📊 " + m, "/pve " + m);
+        view(chat, s, b.json());
+        return;
+    }
+    const proxmox::Guest* found = nullptr;
+    for (int i = 0; i < count; i++) if (g[i].vmid == vmid) found = &g[i];
+    if (!found) { reply(chat, String("No guest ") + vmid + " on " + m + ". /vm lists them."); return; }
+    String base = "/vm " + m + " " + vmid + " ";
+    Buttons b;
+    if (found->running) {
+        b.add("⏻ Shut down", base + "shutdown");
+        b.add("🔁 Reboot", base + "reboot");
+        b.add("⛔ Stop (hard)", base + "stop");
+    } else {
+        b.add("▶️ Start", base + "start");
+    }
+    b.add("« Guests", "/vm " + m);
+    view(chat, String(found->running ? "🟢 " : "⚪ ") + vmid + " " + found->name + (found->lxc ? " (container)" : " (VM)") +
+                   " on " + m + ": " + (found->running ? "running" : "stopped"),
+         b.json());
+}
+
 const Command COMMANDS[] = {
     {"menu",     "",                                   "buttons for everything", cmdMenu},
     {"wake",     "[machine|all]",                      "wake-on-LAN, then report when it's up", cmdWake},
     {"status",   "[machine|all]",                      "🟢 up / 🔴 down", cmdStatus},
     {"hosts",    "",                                   "machines and their last state", cmdHosts},
+    {"host",     "<machine> [setting value]",          "one machine: auto-wake, alerts, pause, maintenance", cmdHost},
+    {"pause",    "<machine|all> [2h|30m|up|off]",      "pause auto-wake and alerts", cmdPause},
+    {"alerts",   "<machine|all> on|off",               "down / back-up alerts", cmdAlerts},
+    {"maint",    "[<machine> add sat 00:00 120|clear]", "weekly maintenance windows", cmdMaint},
+    {"pve",      "[machine] [shutdown|reboot]",        "Proxmox status, backups, updates, power", cmdPve},
+    {"vm",       "[machine] [<id> start|shutdown|…]",  "Proxmox VMs and containers", cmdVm},
     {"autowake", "<machine|all> on|off [min]",         "wake it when unreachable that long", cmdAutowake},
     {"addhost",  "<name> <mac> [ip] [ports] [bcast]",  "add or replace a machine", cmdAddhost},
     {"sethost",  "<machine> ip|mac|ports|broadcast|name <value>", "change a machine", cmdSethost},
@@ -626,7 +1039,8 @@ static bool startsWith(const char* s, const char* p) { return !strncmp(s, p, str
 
 static bool forwardable(const char* msg, int level) {
     // Already reported directly, or about the bot itself.
-    if (startsWith(msg, "TG ") || startsWith(msg, "WoL ") || strstr(msg, "after WoL") || startsWith(msg, "Remote:"))
+    if (startsWith(msg, "TG ") || startsWith(msg, "WoL ") || strstr(msg, "after WoL") || startsWith(msg, "Remote:") ||
+        startsWith(msg, "Server ") || startsWith(msg, "PVE ") || strstr(msg, "maintenance"))
         return false;
     if (level >= 2) return true;
     static const char* const IMPORTANT[] = {
@@ -655,6 +1069,16 @@ static void forwardEvents() {
     }
 }
 
+// End of a maintenance window: add what Proxmox says (backups, updates, restarts).
+static bool onMaintEnd(int host, const char* summary, time_t start) {
+    int c = proxmox::forHost(host);
+    if (c < 0 || wol::lastState(host) != 1) return false;
+    String rep;
+    proxmox::maintenanceReport(c, start, rep);
+    alertNotify((String(summary) + "\n\n" + rep).c_str());
+    return true;
+}
+
 void init() {
     // TELEGRAM_CHAT_ID: one or more numeric IDs, comma-separated.
     const char* p = SECRET_TG_CHATS;
@@ -675,6 +1099,9 @@ void init() {
     }
     s_state = St::Idle;
     wol::setNotifier(notify);
+    wol::setAlertNotifier(alertNotify);
+    wol::setMaintEndHandler(onMaintEnd);
+    backup::setReminder(alertNotify);
     if (finderMode())
         logf("TG", "no TELEGRAM_CHAT_ID yet: send your bot any message, its chat ID is logged here");
     else
@@ -698,7 +1125,9 @@ static void handleUpdate(JsonObject u) {
             logf("TG", "ignored button from chat %lld", chat);
             return;
         }
+        s_editMsg = cq["message"]["message_id"] | 0L;
         dispatch(chat, data);
+        s_editMsg = 0;
         return;
     }
 
@@ -829,6 +1258,15 @@ static void sendRequest(const Outgoing& o) {
         method = "answerCallbackQuery";
         JsonDocument doc;
         doc["callback_query_id"] = o.extra;
+        serializeJson(doc, body);
+    } else if (o.type == Out::Edit) {
+        method = "editMessageText";
+        JsonDocument doc;
+        doc["chat_id"] = o.chat;
+        doc["message_id"] = o.msgId;
+        doc["text"] = o.text;
+        doc["disable_web_page_preview"] = true;
+        if (o.extra.length()) doc["reply_markup"] = serialized(o.extra);
         serializeJson(doc, body);
     } else if (o.type == Out::Commands) {
         method = "setMyCommands";
@@ -1056,7 +1494,9 @@ void loop() {
         if (s_state == St::Polling) {
             handlePoll(status, body, len);
         } else {
-            if (status != 200) setError("%s HTTP %d", s_out[s_outHead].type == Out::Message ? "sendMessage" : "request", status);
+            // 400 on an edit is usually "message is not modified": harmless.
+            if (status != 200 && !(status == 400 && s_out[s_outHead].type == Out::Edit))
+                setError("%s HTTP %d", s_out[s_outHead].type == Out::Message ? "sendMessage" : "request", status);
             s_out[s_outHead].text = String();       // sent (or rejected: don't retry forever)
             s_out[s_outHead].extra = String();
             s_outHead = (s_outHead + 1) % OUTBOX;

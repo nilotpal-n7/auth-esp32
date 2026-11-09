@@ -66,7 +66,40 @@ for i in sorted({int(k.split("_")[1]) for k in secrets if re.match(r"WOL_\d+_NAM
     mac = secrets.get(f"WOL_{i}_MAC", "")
     if name and mac:
         wol_hosts.append((name, mac, secrets.get(f"WOL_{i}_IP", ""),
-                          secrets.get(f"WOL_{i}_PORTS", "8006,22"), secrets.get(f"WOL_{i}_BROADCAST", "")))
+                          secrets.get(f"WOL_{i}_PORTS", "8006,22"), secrets.get(f"WOL_{i}_BROADCAST", ""),
+                          secrets.get(f"WOL_{i}_MAINT", "")))
+# Proxmox API. One server: PROXMOX_TOKEN_ID (user@realm!tokenid) + PROXMOX_TOKEN
+# (the secret), PROXMOX_HOST_IP, PROXMOX_HOST_PORT, optional PROXMOX_HOST (the
+# wake-on-LAN machine's name; default: the machine with that IP, else "pve"),
+# PROXMOX_FINGERPRINT, PROXMOX_NODE, PROXMOX_HOST_URL (web UI link, e.g. a
+# tunnel; only shown in Telegram). More servers: the same keys as PVE_2_...
+def no_comment(v):
+    return re.sub(r"\s+#.*$", "", v).strip()
+
+
+def pve_entry(prefix):
+    tid = secrets.get(prefix + "TOKEN_ID", "")
+    tok = secrets.get(prefix + "TOKEN", "")
+    token = f"{tid}={tok}" if tid and tok and "=" not in tok else tok
+    if not token:
+        return None
+    if not re.match(r"^[^@!=\s]+@[^@!=\s]+![^@!=\s]+=[0-9a-fA-F-]{8,}$", token):
+        print(f"env_secrets: {prefix}TOKEN_ID / {prefix}TOKEN should be user@pam!tokenid and its UUID secret (ignored)")
+        return None
+    ip = no_comment(secrets.get(prefix + "HOST_IP", ""))
+    port = no_comment(secrets.get(prefix + "HOST_PORT", "")) or "8006"
+    machine = no_comment(secrets.get(prefix + "HOST", ""))
+    if not machine:
+        machine = next((h[0] for h in wol_hosts if ip and h[2] == ip), None) or (wol_hosts[0][0] if wol_hosts else "pve")
+    return (machine, token, no_comment(secrets.get(prefix + "FINGERPRINT", "")), no_comment(secrets.get(prefix + "NODE", "")),
+            ip, port, no_comment(secrets.get(prefix + "HOST_URL", "")))
+
+
+pve = [e for e in [pve_entry("PROXMOX_")] if e]
+for i in sorted({int(k.split("_")[1]) for k in secrets if re.match(r"PVE_\d+_TOKEN$", k)}):
+    e = pve_entry(f"PVE_{i}_")
+    if e:
+        pve.append(e)
 tg_token = secrets.get("TELEGRAM_BOT_TOKEN", "")
 tg_chats = secrets.get("TELEGRAM_CHAT_ID", "").replace(" ", "")
 
@@ -83,6 +116,10 @@ if wol_hosts:
     header += ["#define SECRET_WOL_HOSTS \\"]
     header += ["    { " + ", ".join(c_string(v) for v in h) + " }, \\" for h in wol_hosts]
     header += [""]
+if pve:
+    header += ["#define SECRET_PVE \\"]
+    header += ["    { " + ", ".join(c_string(v) for v in p) + " }, \\" for p in pve]
+    header += [""]
 header += [f"#define SECRET_TG_TOKEN {c_string(tg_token)}",
            f"#define SECRET_TG_CHATS {c_string(tg_chats)}", ""]
 content = "\n".join(header)
@@ -97,7 +134,7 @@ if old != content:  # rewrite only on change, so unchanged secrets don't force a
 env.Prepend(CPPPATH=[gen_dir])  # noqa: F821
 print(f"env_secrets: {len(networks)} WiFi network(s), OTA {'enabled' if ota_password else 'disabled'}, "
       f"IITG portal {'set' if (iitg_user and iitg_pass) else 'off'}, "
-      f"{len(wol_hosts) or 'default'} WoL host(s), "
+      f"{len(wol_hosts) or 'default'} WoL host(s), {len(pve)} Proxmox, "
       f"Telegram bot {'off' if not tg_token else ('set' if tg_chats else 'set, chat ID missing (finder mode)')}")
 
 # OTA uploads: password and host come from .env too.

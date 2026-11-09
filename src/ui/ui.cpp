@@ -367,12 +367,15 @@ static const char* serverItemText(int i) {
     return buf;
 }
 
+#define SERVER_ACTIONS 6
 static const char* serverAction(int i) {
     const wol::Host* h = wol::host(s_serverIndex);
     switch (i) {
         case 0: return "Wake";
         case 1: return "Check now";
         case 2: return h && h->autoWake ? "Auto-wake: ON" : "Auto-wake: off";
+        case 3: return h && h->alerts ? "Alerts: ON" : "Alerts: off";
+        case 4: return wol::paused(s_serverIndex) ? "Resume" : "Pause 2 h";
         default: return "Back";
     }
 }
@@ -395,8 +398,10 @@ static void drawServer() {
     if (age == UINT32_MAX) strlcpy(line, "not checked yet", sizeof(line));
     else snprintf(line, sizeof(line), "checked %lu%s ago", (unsigned long)(age < 120 ? age : age / 60), age < 120 ? "s" : "m");
     g_lcd.drawStr(0, 35, line);
-    snprintf(line, sizeof(line), "auto-wake %s%s", h->autoWake ? "on " : "off", h->autoWake ? "" : "");
-    if (h->autoWake) snprintf(line, sizeof(line), "auto-wake on, %u min", h->autoMin);
+    if (wol::paused(s_serverIndex)) strlcpy(line, "PAUSED (no auto-wake/alerts)", sizeof(line));
+    else if (wol::inMaintenance(s_serverIndex)) strlcpy(line, "in maintenance window", sizeof(line));
+    else if (h->autoWake) snprintf(line, sizeof(line), "auto-wake %u min, alerts %s", h->autoMin, h->alerts ? "on" : "off");
+    else snprintf(line, sizeof(line), "auto-wake off, alerts %s", h->alerts ? "on" : "off");
     g_lcd.drawStr(0, 43, line);
     g_lcd.drawBox(0, 46, W, 10);
     g_lcd.setDrawColor(0);
@@ -948,21 +953,28 @@ static void handleKey(Key k) {
             break;
         }
         case Screen::Server:
-            if (k == Key::Up) s_actionSel = (s_actionSel + 3) % 4;
-            else if (k == Key::Down || k == Key::Right) s_actionSel = (s_actionSel + 1) % 4;
+            if (k == Key::Up) s_actionSel = (s_actionSel + SERVER_ACTIONS - 1) % SERVER_ACTIONS;
+            else if (k == Key::Down || k == Key::Right) s_actionSel = (s_actionSel + 1) % SERVER_ACTIONS;
             else if (k == Key::OkLong || k == Key::Left) s_screen = Screen::Servers;
             else if (k == Key::Ok) {
                 const wol::Host* h = wol::host(s_serverIndex);
-                if (!h || s_actionSel == 3) { s_screen = Screen::Servers; break; }
+                if (!h || s_actionSel == SERVER_ACTIONS - 1) { s_screen = Screen::Servers; break; }
                 if (s_actionSel == 0) toast(wol::wake(s_serverIndex, "device") ? "Waking..." : "WoL is off");
                 else if (s_actionSel == 1) {
                     if (!h->ip[0]) { toast("No IP set"); break; }
                     toast("Checking...");
                     draw();
                     toast(wol::check(s_serverIndex) ? "Up" : "Down");
-                } else {
+                } else if (s_actionSel == 2) {
                     wol::setAutoWake(s_serverIndex, !h->autoWake);
                     toast(h->autoWake ? "Auto-wake on" : "Auto-wake off");
+                } else if (s_actionSel == 3) {
+                    wol::setAlerts(s_serverIndex, !h->alerts);
+                    toast(h->alerts ? "Alerts on" : "Alerts off");
+                } else {
+                    bool was = wol::paused(s_serverIndex);
+                    if (!wol::pause(s_serverIndex, was ? 0 : 7200)) toast("Clock not set");
+                    else toast(was ? "Resumed" : "Paused 2 h");
                 }
             }
             break;

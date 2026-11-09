@@ -9,6 +9,7 @@
 #include "fido/ctap2.h"
 #include "net/network.h"
 #include "net/portal.h"
+#include "net/proxmox.h"
 #include "net/telegram.h"
 #include "net/wol.h"
 #include "totp/totp.h"
@@ -66,6 +67,8 @@ static void help() {
         "  portal status|on|off|login|logout   IITG captive-portal auto-login\n"
         "  wol [list] | wol add <name> <mac> [ip|-] [ports] [broadcast] | wol del <host>\n"
         "  wol wake|check <host> | wol auto <host> on|off [min] | wol on|off | wol reset   wake-on-LAN\n"
+        "  wol alerts <host> on|off | wol pause <host> <2h|up|off> | wol maint <host> [add sat 00:00 120|clear|wake on|off]\n"
+        "  pve [machine] | pve guests [machine] | pve cert [machine] | pve unpin <machine>   Proxmox API\n"
         "  tg | tg ping | tg sim <text>   bot status | test TLS | run a bot command here\n"
         "  wifi connect | wifi reset   reconnect | restore the .env list\n"
         "  time | time set <unix>      show / set UTC clock\n"
@@ -111,7 +114,10 @@ static void status() {
         consolef("  Portal:    %s (%s), auto %s, %s\n", portal::stateStr(), portal::user(),
                  portal::enabled() ? "on" : "off", portal::lastResult());
     }
-    consolef("  Servers:   %d, wake-on-LAN %s\n", wol::count(), wol::enabled() ? "on" : "off");
+    consolef("  Servers:   %d, wake-on-LAN %s, %d Proxmox\n", wol::count(), wol::enabled() ? "on" : "off", proxmox::count());
+    char bk[64];
+    backup::describe(bk, sizeof(bk));
+    consolef("  Backup:    %s\n", bk);
     consolef("  Telegram:  %s%s%s\n", telegram::stateStr(), telegram::lastError()[0] ? ", " : "",
              telegram::lastError());
     consolef("  Heap:      %u free, largest block %u\n", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
@@ -222,6 +228,21 @@ static void listHosts() {
                  h->ip[0] ? h->ip : "(no IP)", h->ports[0], h->ports[1], stateWord(i),
                  h->autoWake ? "on " : "off", h->autoWake ? (String("(") + h->autoMin + " min)").c_str() : "");
     }
+    for (int i = 0; i < wol::count(); i++) {
+        const wol::Host* h = wol::host(i);
+        char w[40];
+        String extra;
+        if (!h->alerts) extra += " alerts off";
+        if (wol::paused(i)) extra += h->pausedUntil == WOL_PAUSE_UNTIL_UP ? " paused-until-up" : " paused";
+        for (const wol::Window& win : h->maint) {
+            if (!win.days) continue;
+            wol::formatWindow(win, w, sizeof(w));
+            extra += String(" maint[") + w + "]";
+        }
+        if (h->maint[0].days || h->maint[1].days) extra += h->maintWake ? " wake-before" : " no-wake-before";
+        if (wol::inMaintenance(i)) extra += " IN-WINDOW";
+        if (extra.length()) consolef("     %s:%s\n", h->name, extra.c_str());
+    }
     if (!wol::count()) consoleWrite("  (no machines: wol add <name> <mac> [ip] [ports] [broadcast])\n");
 }
 
@@ -259,6 +280,44 @@ static void cmdWol(int argc, char** argv) {
         int i = wol::put(h, err, sizeof(err));
         if (i < 0) consolef("ERR %s\n", err);
         else { consolef("OK %s saved as #%d\n", h.name, i + 1); logEvent("WoL host %s saved", h.name); }
+    } else if (argc >= 3 && (!strcmp(sub, "alerts") || !strcmp(sub, "pause") || !strcmp(sub, "maint"))) {
+        int i = wol::find(argv[2]);
+        if (i < 0) { consolef("ERR no machine '%s' (wol list)\n", argv[2]); return; }
+        const char* arg = argc >= 4 ? argv[3] : "";
+        char err[64];
+        if (!strcmp(sub, "alerts")) {
+            wol::setAlerts(i, !strcmp(arg, "on"));
+            consolef("OK %s alerts %s\n", wol::host(i)->name, wol::host(i)->alerts ? "on" : "off");
+        } else if (!strcmp(sub, "pause")) {
+            uint32_t secs = !strcmp(arg, "off") ? 0 : !strcmp(arg, "up") ? WOL_PAUSE_UNTIL_UP : wol::parseDuration(arg);
+            if (strcmp(arg, "off") && !secs) { consoleWrite("ERR usage: wol pause <host> 2h|30m|up|off\n"); return; }
+            if (!wol::pause(i, secs)) { consoleWrite("ERR the clock isn't set (use: up)\n"); return; }
+            consolef("OK %s %s\n", wol::host(i)->name, wol::paused(i) ? "paused" : "resumed");
+        } else {
+            // The tokenizer split "add sat 00:00 120": join it again.
+            char rest[64] = "";
+            for (int k = 3; k < argc; k++) {
+                if (k > 3) strlcat(rest, " ", sizeof(rest));
+                strlcat(rest, argv[k], sizeof(rest));
+            }
+            char* verb = strtok(rest, " ");
+            char* tail = strtok(nullptr, "");
+            wol::Window w;
+            if (verb && !strcmp(verb, "add")) {
+                if (!wol::parseWindow(tail, &w, err, sizeof(err)) || !wol::addWindow(i, w, err, sizeof(err))) {
+                    consolef("ERR %s\n", err);
+                    return;
+                }
+            } else if (verb && !strcmp(verb, "clear")) {
+                wol::clearWindows(i);
+            } else if (verb && !strcmp(verb, "wake") && tail) {
+                wol::setMaintWake(i, !strcmp(tail, "on"));
+            } else if (verb) {
+                consoleWrite("ERR usage: wol maint <host> add <days> <HH:MM> <min> | clear | wake on|off\n");
+                return;
+            }
+            listHosts();
+        }
     } else if (argc >= 3 && (!strcmp(sub, "del") || !strcmp(sub, "wake") || !strcmp(sub, "check") ||
                              !strcmp(sub, "auto"))) {
         int i = wol::find(argv[2]);
@@ -288,6 +347,35 @@ static void cmdWol(int argc, char** argv) {
     } else {
         consoleWrite("ERR usage: wol [list] | add <name> <mac> [ip|-] [ports] [broadcast] | del|wake|check <host> |"
                      " auto <host> on|off [min] | on | off | reset\n");
+    }
+}
+
+// pve [machine] | pve guests [machine] | pve cert [machine] | pve unpin <machine>
+static void cmdPve(int argc, char** argv) {
+    const char* sub = argc > 1 ? argv[1] : "";
+    bool verb = !strcmp(sub, "guests") || !strcmp(sub, "cert") || !strcmp(sub, "unpin");
+    const char* who = verb ? (argc > 2 ? argv[2] : "") : sub;
+    int c = proxmox::find(who);
+    if (c < 0) {
+        consolef("ERR %s\n", proxmox::count() ? "no such Proxmox server" : "no Proxmox server in .env (PROXMOX_TOKEN_ID, PROXMOX_TOKEN)");
+        return;
+    }
+    String out;
+    if (!strcmp(sub, "cert")) {
+        consolef("%s certificate: %s\n", proxmox::machine(c), proxmox::pinInfo(c).c_str());
+    } else if (!strcmp(sub, "unpin")) {
+        proxmox::unpin(c);
+        consolef("OK %s: the next certificate seen is pinned\n", proxmox::machine(c));
+    } else if (!strcmp(sub, "guests")) {
+        proxmox::Guest g[24];
+        int n = 0;
+        bool ok = proxmox::guests(c, g, 24, &n, out);
+        for (int i = 0; i < n; i++) consolef("  %d %-20s %s %s\n", g[i].vmid, g[i].name, g[i].lxc ? "CT" : "VM", g[i].running ? "running" : "stopped");
+        if (!ok || out.length()) consolef("%s %s\n", ok ? "WARN" : "ERR", out.c_str());
+    } else {
+        bool ok = proxmox::summary(c, out);
+        consoleWrite(out.c_str());
+        consoleWrite(ok ? "\n" : "\nERR\n");
     }
 }
 
@@ -457,6 +545,7 @@ static void execute(char* line) {
     else if (!strcmp(cmd, "portal")) cmdPortal(argc, argv);
     else if (!strcmp(cmd, "wol")) cmdWol(argc, argv);
     else if (!strcmp(cmd, "tg")) cmdTelegram(argc, argv);
+    else if (!strcmp(cmd, "pve")) cmdPve(argc, argv);
     else if (!strcmp(cmd, "tlstest")) {
         // Verified TLS connection to the hybrid tunnel server: shows whether
         // its certificate chain still verifies and how much RAM TLS needs.
@@ -587,7 +676,7 @@ bool sensitive(const char* line) {
     static const char* const RISKY[] = {
         "auto on", "passkey del", "passkeys del", "unlock ", "bt forget", "ctap", "backup", "restore",
         "wifi del", "wifi reset", "kbd type", "uvhours", "log clear", "hybrid", "time set", "tz ",
-        "approve", "uvpin", "setpin", "clearpin",
+        "approve", "uvpin", "setpin", "clearpin", "pve unpin",
     };
     if (!strcmp(line, "unlock") || !strncmp(line, "unlock list", 11)) return false;
     for (const char* r : RISKY) if (!strncmp(line, r, strlen(r))) return true;
