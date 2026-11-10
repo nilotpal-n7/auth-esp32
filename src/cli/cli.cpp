@@ -3,6 +3,7 @@
 #include "core/approval.h"
 #include "core/backup.h"
 #include "core/log.h"
+#include "core/mem.h"
 #include "core/settings.h"
 #include "crypto/crypto.h"
 #include "fido/credentials.h"
@@ -122,7 +123,7 @@ static void status() {
     consolef("  Backup:    %s\n", bk);
     consolef("  Telegram:  %s%s%s\n", telegram::stateStr(), telegram::lastError()[0] ? ", " : "",
              telegram::lastError());
-    consolef("  Heap:      %u free, largest block %u\n", (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
+    consolef("  Heap:      %u free, largest block %u\n", (unsigned)mem::freeHeap(), (unsigned)mem::largestBlock());
 }
 
 static void cmdTotp(int argc, char** argv) {
@@ -395,7 +396,13 @@ static void cmdTelegram(int argc, char** argv) {
         consolef("%s %s\n", ok ? "OK" : "ERR", out);
         return;
     }
+    if (argc >= 3 && !strcmp(argv[1], "webapprove")) {
+        // "on" is on the sensitive list: from Telegram it waits for OK here.
+        telegram::setWebApprove(!strcmp(argv[2], "on"));
+        logEvent("Web allow via TG %s", telegram::webApprove() ? "on" : "off");
+    }
     consolef("  bot:       %s\n", telegram::stateStr());
+    consolef("  allow browsers from Telegram: %s (tg webapprove on|off)\n", telegram::webApprove() ? "on" : "off");
     if (telegram::lastError()[0]) consolef("  last error: %s\n", telegram::lastError());
     if (telegram::lastIgnoredChat()) consolef("  last ignored chat: %lld\n", telegram::lastIgnoredChat());
 }
@@ -552,18 +559,18 @@ static void execute(char* line) {
     else if (!strcmp(cmd, "tlstest")) {
         // Verified TLS connection to the hybrid tunnel server: shows whether
         // its certificate chain still verifies and how much RAM TLS needs.
-        uint32_t before = ESP.getFreeHeap();
+        uint32_t before = mem::freeHeap();
         WiFiClientSecure c;
         c.setCACert(TUNNEL_ROOT_CAS);
         c.setHandshakeTimeout(12);
         uint32_t t0 = millis();
         bool ok = c.connect("cable.ua5v.com", 443);
-        uint32_t during = ESP.getFreeHeap();
+        uint32_t during = mem::freeHeap();
         char why[100] = "";
         int code = ok ? 0 : c.lastError(why, sizeof(why));
         c.stop();
         consolef("%s tunnel TLS %lu ms, heap before %u, after handshake %u, min ever %u, err %d %s\n", ok ? "OK" : "ERR",
-                 (unsigned long)(millis() - t0), (unsigned)before, (unsigned)during, (unsigned)ESP.getMinFreeHeap(), code, why);
+                 (unsigned long)(millis() - t0), (unsigned)before, (unsigned)during, (unsigned)mem::minFreeHeap(), code, why);
         if (!ok) {
             // Fetch the chain without verification (nothing is sent), then let
             // mbedTLS verify it with our roots to get the real reason.
@@ -587,14 +594,16 @@ static void execute(char* line) {
                 consolef("  chain: %s\n", sub);
             }
             consolef("  roots parsed: rc=%d; verify=%d flags=0x%08lx %s; min heap %u\n", rc, vr, (unsigned long)flags,
-                     info, (unsigned)ESP.getMinFreeHeap());
+                     info, (unsigned)mem::minFreeHeap());
             mbedtls_x509_crt_free(&ca);
             d.stop();
         }
     }
     else if (!strcmp(cmd, "mem")) {
-        consolef("heap %u free, largest %u, min ever %u; loop stack: %u bytes never used\n",
-                 (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap(), (unsigned)ESP.getMinFreeHeap(),
+        consolef("heap %u free, largest %u, min ever %u; failed allocations %u (last %u bytes); "
+                 "loop stack: %u bytes never used\n",
+                 (unsigned)mem::freeHeap(), (unsigned)mem::largestBlock(), (unsigned)mem::minFreeHeap(),
+                 (unsigned)mem::failures(), (unsigned)mem::lastFailedSize(),
                  (unsigned)uxTaskGetStackHighWaterMark(nullptr));
     }
     else if (!strcmp(cmd, "passkeys") || !strcmp(cmd, "passkey")) cmdPasskeys(argc, argv);
@@ -679,7 +688,7 @@ bool sensitive(const char* line) {
     static const char* const RISKY[] = {
         "auto on", "passkey del", "passkeys del", "unlock ", "bt forget", "ctap", "backup", "restore",
         "wifi del", "wifi reset", "kbd type", "uvhours", "log clear", "hybrid", "time set", "tz ",
-        "approve", "uvpin", "setpin", "clearpin", "pve unpin",
+        "approve", "uvpin", "setpin", "clearpin", "pve unpin", "tg webapprove on",
     };
     if (!strcmp(line, "unlock") || !strncmp(line, "unlock list", 11)) return false;
     for (const char* r : RISKY) if (!strncmp(line, r, strlen(r))) return true;

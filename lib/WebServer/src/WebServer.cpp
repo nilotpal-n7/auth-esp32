@@ -42,7 +42,7 @@ static const char Content_Length[] = "Content-Length";
 
 WebServer::WebServer(IPAddress addr, int port)
 : _corsEnabled(false)
-, _server(addr, port, 2)   // AuthKey patch: queue at most 2 connections
+, _server(addr, port)
 , _currentMethod(HTTP_ANY)
 , _currentVersion(0)
 , _currentStatus(HC_NONE)
@@ -66,7 +66,7 @@ WebServer::WebServer(IPAddress addr, int port)
 
 WebServer::WebServer(int port)
 : _corsEnabled(false)
-, _server(port, 2)   // AuthKey patch: queue at most 2 connections
+, _server(port)
 , _currentMethod(HTTP_ANY)
 , _currentVersion(0)
 , _currentStatus(HC_NONE)
@@ -314,7 +314,13 @@ void WebServer::handleClient() {
 //           }
         }
       } else { // !_currentClient.available()
-        if (millis() - _statusChange <= HTTP_MAX_DATA_WAIT) {
+        // AuthKey patch: browsers open spare connections and send nothing on
+        // them at first. Upstream waits up to 5 s for each one while the
+        // connection that carries the real request queues behind it (the
+        // page "hangs"). When another connection is waiting, a silent one
+        // gets 500 ms; the browser simply opens a new one when it needs it.
+        uint32_t waited = millis() - _statusChange;
+        if (waited <= HTTP_MAX_DATA_WAIT && !(waited > 500 && _server.hasClient())) {
           keepCurrentClient = true;
         }
         callYield = true;

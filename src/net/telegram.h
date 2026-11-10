@@ -17,9 +17,10 @@
 // message it receives (serial + event log), so you can copy yours into .env.
 //
 // The TLS certificate is verified against Telegram's root CA; a failed check
-// is reported, never bypassed. Only one TLS connection fits in RAM next to
-// Bluetooth, so the bot hangs up just before the campus portal's TLS requests
-// and while a hybrid sign-in runs, then reconnects.
+// is reported, never bypassed. The connection stays up next to the web page,
+// Proxmox calls and the campus portal's refresh; it hangs up only while a
+// hybrid sign-in runs, while the campus network is logged out, or when RAM is
+// short, then reconnects.
 // =============================================================================
 #pragma once
 
@@ -44,6 +45,12 @@ const char* notifyLevelName(int level);
 // Whether /code may send TOTP codes. Only the device UI changes it.
 bool remoteCodes();
 void setRemoteCodes(bool on);
+
+// Whether "allow this browser?" (web page) is also offered here, for when you
+// are not near the device. On by default; switching it back on from Telegram
+// needs OK on the device. See net/web.h for what such a session can't do.
+bool webApprove();
+void setWebApprove(bool on);
 
 // Queue a message to every allowed chat.
 void notify(const char* text);

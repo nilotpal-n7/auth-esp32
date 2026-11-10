@@ -3,6 +3,7 @@
 #include "cli/cli.h"
 #include "core/approval.h"
 #include "core/log.h"
+#include "core/mem.h"
 #include "core/settings.h"
 #include "crypto/crypto.h"
 #include "fido/ctap2.h"
@@ -10,6 +11,7 @@
 #include "net/portal.h"
 #include "net/proxmox.h"
 #include "net/telegram_ca.h"
+#include "net/web.h"
 #include "net/wol.h"
 #include "core/backup.h"
 #include "totp/totp.h"
@@ -114,7 +116,15 @@ static void backOff(uint32_t fixedSecs = 0) {
 
 static bool s_sim = false;                       // replies go to the console (tg sim)
 
-static void push(Out type, long long chat, const String& text, const String& extra, long msgId = 0) {
+// An answer someone is waiting for goes out at once, even if that means
+// dropping the long poll (a new TLS handshake: ~2 s during which everything
+// else waits). Notifications ride on the same connection once the poll
+// returns (at most TG_LONG_POLL_SECS later).
+static bool s_urgent = false;
+
+static void push(Out type, long long chat, const String& text, const String& extra, long msgId = 0,
+                 bool urgent = true) {
+    if (urgent) s_urgent = true;
     if (s_outCount == OUTBOX) {                  // drop the oldest
         s_out[s_outHead].text = String();
         s_out[s_outHead].extra = String();
@@ -152,7 +162,7 @@ static void view(long long chat, String text, const String& markup) {
 }
 
 void notify(const char* text) {
-    for (int i = 0; i < s_chatCount; i++) push(Out::Message, s_chats[i], text, String());
+    for (int i = 0; i < s_chatCount; i++) push(Out::Message, s_chats[i], text, String(), 0, false);
 }
 
 static int s_notifyLevel = 1;
@@ -190,6 +200,12 @@ const char* notifyLevelName(int l) { return l <= 0 ? "off" : l == 1 ? "important
 void setNotifyLevel(int l) {
     s_notifyLevel = l < 0 ? 0 : l > 2 ? 2 : l;
     s_prefs.putInt("notify", s_notifyLevel);
+}
+static bool s_webApprove = true;
+bool webApprove() { return s_webApprove; }
+void setWebApprove(bool on) {
+    s_webApprove = on;
+    s_prefs.putBool("webok", on);
 }
 bool remoteCodes() { return s_remoteCodes; }
 void setRemoteCodes(bool on) {
@@ -509,6 +525,9 @@ static void cmdSet(long long chat, char* arg) {
         } else if (!strcasecmp(name, "autoapprove")) {
             if (on) { runConsole(chat, "auto on"); return; }   // weakens protection: OK on the device
             settings::setAutoApprove(false);
+        } else if (!strcasecmp(name, "webapprove")) {
+            if (on) { runConsole(chat, "tg webapprove on"); return; }   // same
+            setWebApprove(false);
         } else { reply(chat, "Unknown switch. /set lists them."); return; }
         logEvent("Remote: %s %s", name, on ? "on" : "off");
     }
@@ -519,6 +538,7 @@ static void cmdSet(long long chat, char* arg) {
         {"autoapprove", "Auto-approve sign-ins", settings::autoApprove()},
         {"keyboard", "Bluetooth keyboard", settings::keyboard()},
         {"web", "Web page", settings::webPage()},
+        {"webapprove", "Allow browsers from here", s_webApprove},
     };
     String s = "Switches (tap to flip):\n";
     for (auto& x : sw) {
@@ -1007,6 +1027,46 @@ const Command COMMANDS[] = {
 };
 const int COMMAND_COUNT = sizeof(COMMANDS) / sizeof(COMMANDS[0]);
 
+// --- "Allow this browser?" from the web page ------------------------------------------------
+
+// Called by the web server when a browser asks for a session. The same code is
+// shown in that browser and on the device.
+static bool askWebAccess(const char* ip, unsigned code) {
+    if (!enabled() || finderMode() || !s_webApprove || !network::connected()) return false;
+    // Any device on the network can cause a prompt: at most 3 per 10 minutes
+    // (after that the request can still be answered on the device).
+    static uint32_t recent[3];
+    uint32_t now = millis();
+    if (recent[0] && now - recent[0] < 600000UL) return false;
+    recent[0] = recent[1];
+    recent[1] = recent[2];
+    recent[2] = now | 1;
+    Buttons b;
+    b.add("✅ Allow 12 h", String("/webok ") + code);
+    b.add("❌ Deny", String("/webno ") + code);
+    String text = String("🌐 A browser at ") + ip + " wants to open the AuthKey web page.\nCode shown in that browser: " +
+                  code + "\n\nAllow it only if that is you and the code matches. It will not be able to delete keys, "
+                  "start a phone sign-in or install firmware. (OK on the AuthKey works too.)";
+    String markup = b.json();
+    for (int i = 0; i < s_chatCount; i++) push(Out::Message, s_chats[i], text, markup);
+    return true;
+}
+
+static void cmdWebAnswer(long long chat, const char* arg, bool allow) {
+    unsigned code = (unsigned)atoi(arg);
+    if (!web::remoteDecision(code, allow)) {
+        view(chat, "That browser request is no longer waiting (answered already, or it timed out). "
+                   "Press Unlock in the browser again.", String());
+        return;
+    }
+    logf("TG", "web access %s from chat %lld", allow ? "allowed" : "denied", chat);
+    if (allow)
+        view(chat, String("✅ Browser allowed for 12 hours (code ") + code + "). Deleting keys, phone sign-in and "
+                   "firmware still need OK on the AuthKey.", String());
+    else
+        view(chat, String("❌ Browser request denied (code ") + code + ").", String());
+}
+
 static void dispatch(long long chat, const char* textIn) {
     static char text[360];
     strlcpy(text, textIn, sizeof(text));
@@ -1017,6 +1077,8 @@ static void dispatch(long long chat, const char* textIn) {
     char* at = strchr(text, '@');               // "/wake@MyBot" in group chats
     if (at) *at = '\0';
     if (!strcasecmp(text, "/start")) { cmdMenu(chat, arg); return; }
+    if (!strcasecmp(text, "/webok")) { cmdWebAnswer(chat, arg, true); return; }     // buttons of askWebAccess()
+    if (!strcasecmp(text, "/webno")) { cmdWebAnswer(chat, arg, false); return; }
     for (int i = 0; i < COMMAND_COUNT; i++) {
         if (!strcasecmp(text + 1, COMMANDS[i].name)) {
             logf("TG", "/%s from %lld", COMMANDS[i].name, chat);
@@ -1095,6 +1157,7 @@ void init() {
     s_prefs.begin("tg", false);
     s_notifyLevel = s_prefs.getInt("notify", 1);
     s_remoteCodes = s_prefs.getBool("codes", false);
+    s_webApprove = s_prefs.getBool("webok", true);
     s_seenSeq = logTotal();      // notify about events from now on (incl. this boot's)
     if (!enabled()) {
         logf("TG", "no TELEGRAM_BOT_TOKEN in .env: bot off (tg sim <command> still works)");
@@ -1104,6 +1167,7 @@ void init() {
     wol::setNotifier(notify);
     wol::setAlertNotifier(alertNotify);
     wol::setMaintEndHandler(onMaintEnd);
+    web::setRemoteAsker(askWebAccess);
     backup::setReminder(alertNotify);
     if (finderMode())
         logf("TG", "no TELEGRAM_CHAT_ID yet: send your bot any message, its chat ID is logged here");
@@ -1157,6 +1221,14 @@ static void handleUpdate(JsonObject u) {
     time_t now = network::now();
     if (now && sent && now - sent > TG_MAX_COMMAND_AGE_SECS) {
         logf("TG", "ignored %.20s from %lld: sent %lld s ago", text, chat, (long long)(now - sent));
+        // Say so (once per batch), otherwise the command just looks lost.
+        static uint32_t lastNotice = 0;
+        if (!lastNotice || millis() - lastNotice > 60000) {
+            lastNotice = millis();
+            long mins = (long)((now - sent + 30) / 60);
+            reply(chat, String("⏱ \"") + String(text).substring(0, 30) + "\" reached me " + mins +
+                        " min late (I was offline or busy), so I did not run it. Send it again if you still want it.");
+        }
         return;
     }
     dispatch(chat, text);
@@ -1213,23 +1285,28 @@ static bool s_ramWait = false;    // the last connect attempt only waited for RA
 
 static bool connectTls() {
     s_ramWait = false;
-    // A TLS session peaks at ~54 KB here; trying with less just fails (as a
-    // "certificate verification failed" when RSA can't allocate) and
-    // fragments the heap further.
-    if (ESP.getMaxAllocHeap() < TG_MIN_HEAP || ESP.getFreeHeap() < TG_MIN_FREE_HEAP) {
-        setError("waiting for RAM (free %u, largest %u)", (unsigned)ESP.getFreeHeap(),
-                 (unsigned)ESP.getMaxAllocHeap());
+    // Trying with too little RAM just fails half-way and fragments the heap.
+    if (!mem::roomForTls()) {
+        setError("waiting for RAM (free %u, largest %u)", (unsigned)mem::freeHeap(),
+                 (unsigned)mem::largestBlock());
         s_ramWait = true;
         return false;
     }
     s_tls.setCACert(TELEGRAM_ROOT_CA);
     s_tls.setHandshakeTimeout(10);
     logf("TG", "connecting to %s", TG_HOST);
+    uint32_t failsBefore = mem::failures();
     // 5 s for the TCP connect: the main loop (web page included) waits meanwhile.
     if (!s_tls.connect(TG_HOST, 443, TG_CONNECT_TIMEOUT_MS)) {
         char why[100] = "";
         int code = s_tls.lastError(why, sizeof(why));
-        if (code == -0x2700 /* MBEDTLS_ERR_X509_CERT_VERIFY_FAILED */) {
+        if (mem::failures() != failsBefore) {
+            // An allocation failed during the handshake. mbedTLS reports that as
+            // all sorts of errors, "certificate verification failed" included:
+            // it says nothing about the certificate.
+            setError("ran out of RAM while connecting (free %u)", (unsigned)mem::freeHeap());
+            s_ramWait = true;
+        } else if (code == -0x2700 /* MBEDTLS_ERR_X509_CERT_VERIFY_FAILED */) {
             // Not bypassed: someone (e.g. TLS inspection) presented a certificate
             // that doesn't chain to Telegram's root.
             setError("certificate check FAILED (TLS inspection?)");
@@ -1312,7 +1389,7 @@ static void queueCommandList() {
     }
     String body;
     serializeJson(doc, body);
-    push(Out::Commands, 0, body, String());
+    push(Out::Commands, 0, body, String(), 0, false);
     s_commandsSet = true;
 }
 
@@ -1367,11 +1444,16 @@ static bool readAvailable() {
 static bool mustYield() {
     if (hybrid::state() != hybrid::State::Idle) return true;
     if (portal::haveCredentials()) {
-        // The portal's code is unchanged; the bot just steps aside before its
-        // TLS requests: a login while offline, or the scheduled refresh / check
-        // (also "Login now", which sets the countdown to 0).
+        // Logged out of the campus network: nothing reaches Telegram anyway,
+        // so leave the time and RAM to the login.
         if (!portal::online() && portal::enabled() && !portal::paused()) return true;
-        if (portal::secondsToNext() <= 3) return true;
+        // The scheduled refresh / check (also "Login now", which sets the
+        // countdown to 0) opens its own TLS session. It fits next to ours
+        // unless RAM is short; then step aside until it is done.
+        static bool aside = false;
+        if (portal::secondsToNext() > 3) aside = false;
+        else if (!mem::roomForTls()) aside = true;
+        if (aside) return true;
     }
     return false;
 }
@@ -1389,7 +1471,7 @@ static void describePeer() {
         char why[80] = "";
         int code = d.lastError(why, sizeof(why));
         logf("TG", "diagnostic connect to %s failed too (%d: %s), free heap %u, largest %u", ip.toString().c_str(),
-             code, why, (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
+             code, why, (unsigned)mem::freeHeap(), (unsigned)mem::largestBlock());
         return;
     }
     const mbedtls_x509_crt* crt = d.getPeerCertificate();
@@ -1432,7 +1514,7 @@ static void describePeer() {
 bool ping(char* out, size_t cap) {
     if (!network::connected()) { snprintf(out, cap, "no WiFi"); return false; }
     if (s_connected) { snprintf(out, cap, "bot is connected right now (that already proves it works)"); return true; }
-    uint32_t heapBefore = ESP.getFreeHeap();
+    uint32_t heapBefore = mem::freeHeap();
     uint32_t t0 = millis();
     WiFiClientSecure c;
     c.setCACert(TELEGRAM_ROOT_CA);
@@ -1445,7 +1527,7 @@ bool ping(char* out, size_t cap) {
         return false;
     }
     uint32_t handshake = millis() - t0;
-    uint32_t heapDuring = ESP.getFreeHeap();
+    uint32_t heapDuring = mem::freeHeap();
     c.print("GET /bot/getMe HTTP/1.1\r\nHost: " TG_HOST "\r\nConnection: close\r\n\r\n");
     char line[48] = "";
     uint32_t deadline = millis() + 5000;
@@ -1494,9 +1576,9 @@ void loop() {
         if (status < 0) {
             uint32_t limit = s_state == St::Polling ? POLL_STALL_MS : SEND_STALL_MS;
             if (millis() - s_reqMs > limit) { setError("no reply from Telegram"); hangUp(); }
-            // Something is waiting to go out: abandon the long poll (updates
+            // An answer is waiting to go out: abandon the long poll (updates
             // stay queued at Telegram until confirmed by the next offset).
-            else if (s_state == St::Polling && s_outCount && !s_respLen) hangUp();
+            else if (s_state == St::Polling && s_outCount && s_urgent && !s_respLen) hangUp();
             return;
         }
         if (s_state == St::Polling) {
@@ -1509,6 +1591,7 @@ void loop() {
             s_out[s_outHead].extra = String();
             s_outHead = (s_outHead + 1) % OUTBOX;
             s_outCount--;
+            if (!s_outCount) s_urgent = false;
         }
         s_respLen = 0;
         if (s_state == St::Polling || s_state == St::Sending) s_state = St::Idle;

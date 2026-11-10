@@ -18,7 +18,8 @@ static void finish(bool ok) {
     if (done) done(ok, ctx);
 }
 
-bool ask(const char* title, const char* detail, const char* hint, bool needPin, DoneFn done, void* ctx) {
+bool ask(const char* title, const char* detail, const char* hint, bool needPin, DoneFn done, void* ctx,
+         uint32_t timeoutMs) {
     if (s_active) return false;
     memset(&s_req, 0, sizeof(s_req));
     strlcpy(s_req.title, title, sizeof(s_req.title));
@@ -26,6 +27,7 @@ bool ask(const char* title, const char* detail, const char* hint, bool needPin, 
     strlcpy(s_req.hint, hint ? hint : "", sizeof(s_req.hint));
     s_req.needPin = needPin && settings::pinIsSet();
     s_req.startedMs = millis();
+    s_req.timeoutMs = timeoutMs ? timeoutMs : FIDO_USER_TIMEOUT_MS;
     s_done = done;
     s_ctx = ctx;
     s_active = true;
@@ -63,7 +65,7 @@ void forceApprove() {
 #endif
 
 void loop() {
-    if (s_active && millis() - s_req.startedMs > FIDO_USER_TIMEOUT_MS) {
+    if (s_active && millis() - s_req.startedMs > s_req.timeoutMs) {
         logf("APPROVE", "'%s' timed out", s_req.title);
         finish(false);
     }

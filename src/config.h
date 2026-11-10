@@ -10,7 +10,7 @@
 #include "authkey_secrets.h"
 
 #define FW_NAME     "AuthKey-ESP32"
-#define FW_VERSION  "2.1.0"
+#define FW_VERSION  "2.2.0"
 
 // --- Pins --------------------------------------------------------------------
 #define PIN_SDA         21
@@ -75,7 +75,7 @@
 #define WOL_DEFAULT_HOST        {"pve", "64:00:6a:2b:36:9f", "172.16.114.175", "8006,22", "172.16.119.255", ""}
 #define WOL_MAX_HOSTS           8
 #define WOL_UDP_PORT            9
-#define WOL_CONNECT_TIMEOUT_MS  1500               // per port: a check blocks at most ~3 s
+#define WOL_CONNECT_TIMEOUT_MS  1000               // per port; a machine on the LAN answers in milliseconds
 #define WOL_PACKETS             3                  // magic packets per wake, 1 s apart
 #define WOL_WATCH_SECS          180                // after a wake: report when it is up
 #define WOL_WATCH_EVERY_SECS    10
@@ -99,8 +99,15 @@
 #define TG_BACKOFF_MIN_SECS     5
 #define TG_BACKOFF_MAX_SECS     30                 // network errors: retry at least this often
 #define TG_CONNECT_TIMEOUT_MS   5000               // TCP connect (the loop blocks meanwhile)
-#define TG_MIN_HEAP             20000              // largest free block: TLS allocates 16 KB record buffers
-#define TG_MIN_FREE_HEAP        62000              // total free heap needed (TLS peaks at ~54 KB)
+
+// --- TLS and RAM ---------------------------------------------------------------
+// Record buffers are allocated on demand (src/third_party/mbedtls_dynamic), so
+// an idle session holds ~12 KB instead of ~50 KB. A handshake still peaks at
+// ~30 KB for a moment (certificates, RSA / ECC maths; the largest single block
+// is the server certificate record, ~6 KB). Below these numbers (usable
+// heap, see core/mem.h) a new session waits instead of failing half-way.
+#define TLS_MIN_FREE_HEAP       32000
+#define TLS_MIN_BLOCK           8000
 
 // --- Watchdog ----------------------------------------------------------------
 // The longest legitimate stall in loop() is a TLS handshake or a WiFi

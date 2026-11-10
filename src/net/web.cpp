@@ -2,6 +2,7 @@
 #include "config.h"
 #include "core/approval.h"
 #include "core/log.h"
+#include "core/mem.h"
 #include "core/settings.h"
 #include "crypto/crypto.h"
 #include "fido/credentials.h"
@@ -30,11 +31,14 @@ namespace web {
 #define WEB_MIN_FREE_HEAP   14000      // below this, requests wait (see loop())
 #define WEB_MIN_BLOCK       8000
 
+#define WEB_REMOTE_ASK_MS   90000UL    // time to answer when Telegram was asked too
+
 struct Session {
     char     token[33];
     uint32_t ip;
     uint32_t createdMs;
     bool     used;
+    bool     remote;     // allowed from Telegram, not on the device: limited (see needLocal())
 };
 
 static WebServer s_http(80);
@@ -47,7 +51,13 @@ static struct {
     uint32_t ip;
     uint8_t  state;      // 0 none, 1 waiting, 2 allowed, 3 denied
     int      slot;       // session created on approval
+    uint16_t code;       // shown in the browser, on the device and in Telegram
+    bool     asked;      // Telegram was asked too
+    bool     remote;     // the answer came from Telegram
 } s_pend;
+
+static RemoteAskFn s_remoteAsk = nullptr;
+void setRemoteAsker(RemoteAskFn fn) { s_remoteAsk = fn; }
 
 // --- Helpers -------------------------------------------------------------------
 
@@ -108,7 +118,17 @@ static bool guard(bool change) {
     return true;
 }
 
-static int newSession(uint32_t ip) {
+// For what stays local: deleting keys, phone sign-in, firmware. A browser that
+// was let in from Telegram can't do these (Telegram itself needs OK on the
+// device for them too).
+static bool needLocal() {
+    int i = findSession();
+    if (i >= 0 && !s_sessions[i].remote) return true;
+    sendError(403, "This browser was allowed from Telegram. This needs a browser allowed with OK on the AuthKey itself (Lock, then Unlock).");
+    return false;
+}
+
+static int newSession(uint32_t ip, bool remote) {
     int slot = 0;
     for (int i = 0; i < WEB_SESSIONS; i++) {
         if (!s_sessions[i].used) { slot = i; break; }
@@ -121,6 +141,7 @@ static int newSession(uint32_t ip) {
     s_sessions[slot].ip = ip;
     s_sessions[slot].createdMs = millis();
     s_sessions[slot].used = true;
+    s_sessions[slot].remote = remote;
     return slot;
 }
 
@@ -128,7 +149,7 @@ static int newSession(uint32_t ip) {
 
 // Large bodies go out in 1 KB pieces. One big write needs the network stack
 // to buffer all of it, which fails (EAGAIN for 8 s, stalling the whole loop)
-// while the Telegram TLS session holds most of the RAM.
+// when RAM is short.
 static void sendBody(const uint8_t* p, size_t n) {
     for (size_t off = 0; off < n && s_http.client().connected(); off += 1024) {
         s_http.sendContent((const char*)p + off, n - off < 1024 ? n - off : 1024);
@@ -155,7 +176,7 @@ static void handleStatus() {
     o.reserve(700);
     o += "{\"fw\":";              jstr(o, FW_VERSION);
     o += ",\"uptime\":";          o += millis() / 1000;
-    o += ",\"heap\":";            o += ESP.getFreeHeap();
+    o += ",\"heap\":";            o += mem::freeHeap();
     o += ",\"clock\":";           jstr(o, clock);
     o += ",\"auth\":";            o += auth ? "true" : "false";
     o += ",\"wifi\":{\"ssid\":";  jstr(o, network::ssid());
@@ -189,9 +210,9 @@ static void handleStatus() {
 static void onWebApproval(bool approved, void*) {
     if (s_pend.state != 1) return;
     if (approved) {
-        s_pend.slot = newSession(s_pend.ip);
+        s_pend.slot = newSession(s_pend.ip, s_pend.remote);
         s_pend.state = 2;
-        logEvent("Web access allowed");
+        logEvent(s_pend.remote ? "Web access allowed (Telegram)" : "Web access allowed");
     } else {
         s_pend.state = 3;
     }
@@ -203,18 +224,30 @@ static void handleSessionStart() {
     if (s_http.header("X-AuthKey") != "1") { sendError(403, "missing X-AuthKey header"); return; }
     uint32_t ip = clientIp();
     if (!(s_pend.state == 1 && s_pend.ip == ip)) {
-        char who[24];
-        snprintf(who, sizeof(who), "from %s", IPAddress(ip).toString().c_str());
-        if (!approval::ask("ALLOW WEB ACCESS?", who, "this browser, 12 hours", false, onWebApproval, nullptr)) {
+        if (approval::pending()) { sendError(409, "the device is busy; try again"); return; }
+        uint32_t r;
+        crypto::random((uint8_t*)&r, sizeof(r));
+        uint16_t code = 1000 + r % 9000;
+        String addr = IPAddress(ip).toString();
+        // Telegram first: whether it was asked decides how long the request waits.
+        bool asked = s_remoteAsk && s_remoteAsk(addr.c_str(), code);
+        char who[24], hint[32];
+        snprintf(who, sizeof(who), "from %s", addr.c_str());
+        snprintf(hint, sizeof(hint), "code %u, 12 hours", (unsigned)code);
+        if (!approval::ask("ALLOW WEB ACCESS?", who, hint, false, onWebApproval, nullptr, asked ? WEB_REMOTE_ASK_MS : 0)) {
             sendError(409, "the device is busy; try again");
             return;
         }
         crypto::random((uint8_t*)&s_pend.id, sizeof(s_pend.id));
         s_pend.id &= 0x7FFFFFFF;
         s_pend.ip = ip;
+        s_pend.code = code;
+        s_pend.asked = asked;
+        s_pend.remote = false;
         s_pend.state = 1;
     }
-    sendJson(200, String("{\"id\":") + s_pend.id + "}");
+    sendJson(200, String("{\"id\":") + s_pend.id + ",\"code\":" + s_pend.code +
+                  ",\"telegram\":" + (s_pend.asked ? "true" : "false") + "}");
 }
 
 static void handleSessionPoll() {
@@ -233,6 +266,14 @@ static void handleSessionPoll() {
         sendJson(200, "{\"state\":\"denied\"}");
     }
     s_pend.state = 0;
+}
+
+bool remoteDecision(unsigned code, bool allow) {
+    const approval::Request* a = approval::pending();
+    if (s_pend.state != 1 || !a || strcmp(a->title, "ALLOW WEB ACCESS?") || code != s_pend.code) return false;
+    if (allow) { s_pend.remote = true; approval::approve(); }
+    else approval::deny();
+    return true;
 }
 
 static void handleLogout() {
@@ -300,7 +341,7 @@ static void handleTotpAdd() {
 }
 
 static void handleTotpDelete() {
-    if (!guard(true)) return;
+    if (!guard(true) || !needLocal()) return;
     if (!totp::remove(s_http.arg("i").toInt())) { sendError(404, "no such account"); return; }
     logEvent("TOTP deleted (web)");
     sendJson(200, "{\"ok\":true}");
@@ -327,7 +368,7 @@ static void handlePasskeyList() {
 }
 
 static void handlePasskeyDelete() {
-    if (!guard(true)) return;
+    if (!guard(true) || !needLocal()) return;
     if (!creds::residentDelete(s_http.arg("slot").toInt())) { sendError(404, "no such passkey"); return; }
     logEvent("Passkey deleted (web)");
     sendJson(200, "{\"ok\":true}");
@@ -338,6 +379,7 @@ static void handleHybrid() {
     String qr = s_http.arg("plain");
     qr.trim();
     if (qr == "stop") { hybrid::stop("stopped from web"); sendJson(200, "{\"ok\":true}"); return; }
+    if (!needLocal()) return;
     if (!hybrid::start(qr.c_str())) { sendError(400, "not a passkey QR (FIDO:/...)"); return; }
     sendJson(200, "{\"ok\":true}");
 }
@@ -750,12 +792,12 @@ void loop() {
     // Cookie header can be 2+ KB). If malloc fails there, the core's
     // String::move reads a null pointer and the device crashes. While RAM is
     // short, leave the request waiting; a later pass serves it.
-    if (ESP.getFreeHeap() < WEB_MIN_FREE_HEAP || ESP.getMaxAllocHeap() < WEB_MIN_BLOCK) {
+    if (mem::freeHeap() < WEB_MIN_FREE_HEAP || mem::largestBlock() < WEB_MIN_BLOCK) {
         static uint32_t lastLog = 0;
         if (millis() - lastLog > 10000) {
             lastLog = millis();
-            logf("WEB", "low RAM (free %u, largest %u): requests wait", (unsigned)ESP.getFreeHeap(),
-                 (unsigned)ESP.getMaxAllocHeap());
+            logf("WEB", "low RAM (free %u, largest %u): requests wait", (unsigned)mem::freeHeap(),
+                 (unsigned)mem::largestBlock());
         }
         return;
     }

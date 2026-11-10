@@ -13,8 +13,8 @@
 // you can compare). A different certificate later is refused before the
 // token is sent; `pve unpin <machine>` (OK on the device) accepts a renewed one.
 //
-// Every call blocks for a few seconds (TLS handshake + requests) and first
-// closes the Telegram connection: only one TLS session fits in RAM.
+// Every call blocks for a few seconds (TLS handshake + requests). The Telegram
+// connection stays up next to it unless RAM is short.
 // =============================================================================
 #pragma once
 

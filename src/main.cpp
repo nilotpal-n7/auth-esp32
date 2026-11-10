@@ -13,6 +13,7 @@
 #include "core/approval.h"
 #include "core/backup.h"
 #include "core/log.h"
+#include "core/mem.h"
 #include "core/settings.h"
 #include "crypto/crypto.h"
 #include "fido/credentials.h"
@@ -68,6 +69,7 @@ static const char* resetReason() {
 }
 
 void setup() {
+    mem::init();
     Serial.begin(115200);
     pinMode(PIN_LED, OUTPUT);
     delay(200);

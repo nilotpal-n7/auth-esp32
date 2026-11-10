@@ -374,7 +374,7 @@ them when you type `/`):
 | `/delhost <machine>` · `/wol on\|off` | Remove a machine · the global switch |
 | `/info` · `/log [n]` | Device status (WiFi, campus, Bluetooth, RAM…) · event log |
 | `/portal [login\|logout\|on\|off]` | Campus internet login |
-| `/set [switch on\|off]` | Switches: campus auto-login, wake-on-LAN, auto-approve, keyboard, web page |
+| `/set [switch on\|off]` | Switches: campus auto-login, wake-on-LAN, auto-approve, keyboard, web page, allowing browsers from Telegram |
 | `/notify off\|important\|all` | Push notifications for events (default: important = boots, campus drops, sign-ins, PIN / pairing / backup changes) |
 | `/totp` · `/code <account>` | Account names · a TOTP code (only if allowed on the device) |
 | `/hybrid <FIDO:/…>` | Passkey sign-in from a QR's text |
@@ -420,18 +420,25 @@ bot command and prints the reply here (testing without Telegram).
 
 The Telegram certificate is verified against Go Daddy Root G2. A failed check
 is logged (`TG cert check failed`) and never bypassed. The campus network
-passes Telegram through without TLS inspection. Only one TLS connection fits
-in RAM next to Bluetooth, so the bot hangs up just before the campus portal's
-refresh or login and during hybrid sign-ins, then reconnects. A task
+passes Telegram through without TLS inspection. The bot stays connected next
+to the web page, Proxmox calls and the campus portal's refresh; it hangs up
+only during hybrid sign-ins, while the campus network is logged out, or when
+RAM is short, then reconnects. A command that reaches the device more than
+2 minutes late (it was offline or busy) is not run; the bot says so. A task
 watchdog reboots the device if the main loop ever stalls for 60 s.
 
-RAM is the tight resource: a TLS session peaks at ~54 KB and the core's
-mbedTLS has fixed 16 KB buffers. The hybrid sign-in's ~7 KB of buffers are
-allocated only while a session runs, so the bot and the portal have room. When the heap runs short, mbedTLS reports it
-as "certificate verification failed", so `mem` (free heap, largest block,
-loop-stack use) and `tlstest` (a verified connection to the hybrid tunnel
-server, with the chain and mbedTLS's reason on failure) are there to tell
-the two apart.
+RAM is the tight resource (about 65 KB of heap is free once WiFi and
+Bluetooth run). The core's mbedTLS holds two fixed 16 KB buffers per TLS
+session; `src/third_party/mbedtls_dynamic` (ESP-IDF's "dynamic buffer" code,
+linked in with `--wrap`) allocates them per record instead, so an idle
+session costs ~12 KB rather than ~50 KB and several fit at once. A handshake
+still peaks at ~30 KB for a moment; a new session waits while less is free.
+`mem` shows the usable heap, the largest block, how many allocations ever
+failed and the loop-stack use. (`ESP.getFreeHeap()` is not used: it also
+counts ~12 KB of instruction RAM that `malloc` can't use.) `tlstest` makes a
+verified connection to the hybrid tunnel server and prints the chain and
+mbedTLS's reason on failure. A handshake that fails because an allocation
+failed is reported as "ran out of RAM", not as a certificate problem.
 
 #### Proxmox
 
@@ -476,8 +483,7 @@ certificate seen on the first connection, stored on the device (`/pve cert`
 shows it, so you can compare it with the Proxmox UI). Any other certificate
 is refused before the token is sent. After renewing the certificate, run
 `/pve unpin`, which needs OK on the AuthKey. A Proxmox call takes a few
-seconds and briefly closes the Telegram connection, because only one TLS
-session fits in RAM.
+seconds; the Telegram connection stays up next to it unless RAM is short.
 
 **Server BIOS (F2 at boot), needed for this to work:**
 
@@ -507,7 +513,14 @@ Olimex ESP32-POE) on the same LAN.
 from any browser on the same network, phones included:
 
 - Anyone on the network sees only the device status and campus-login state.
-- **Allow this browser** shows "ALLOW WEB ACCESS?" on the OLED; press OK.
+- **Allow this browser** shows "ALLOW WEB ACCESS?" and a 4-digit code on the
+  OLED; press OK. With the Telegram bot set up, the same question also
+  arrives in your chat with **Allow** / **Deny** buttons (90 s to answer), for
+  when you are not near the device: check that the code matches the one in
+  the browser. A browser allowed from Telegram can't delete passkeys or
+  authenticator accounts, start a phone sign-in or install firmware; those
+  need a browser allowed on the device. `/set webapprove off` turns the
+  Telegram question off (turning it back on needs OK on the device).
   For 12 hours that browser gets the event log, campus Login/Logout and the
   auto-login switch, the passkey and authenticator lists (delete, add an
   `otpauth://` link), the phone sign-in box, the wake-on-LAN machines (Wake,
@@ -546,7 +559,7 @@ week. `status` (and `/info`) shows the state: `Backup: 3 days ago, up to date`.
 **Menu → Event log**, `log` on the serial console, or the web page. Each line
 is stamped with the time (or `+M:SS` since boot before the clock is set). The
 log survives reboots, crashes and power cuts. Each boot logs why the last one
-ended (`Boot v2.1.0 (crash)`, `(power on)`, `(restart)`). `log clear` empties it.
+ended (`Boot v2.2.0 (crash)`, `(power on)`, `(restart)`). `log clear` empties it.
 
 ## Serial console
 
@@ -584,6 +597,11 @@ ended (`Boot v2.1.0 (crash)`, `(power on)`, `(restart)`). `log clear` empties it
 - The `test` build (`pio run -e test`) adds console commands that let software
   on the PC approve requests (`approve!` even skips the PIN for backup
   prompts). Use it only for running the tests.
+- A browser can be allowed from Telegram as well as on the device. Whoever
+  controls your Telegram account **and** is on the same network could open
+  the web page that way, which is why such a session can't delete keys, start
+  a sign-in or install firmware. The prompt goes only to the chat IDs in
+  `.env`, carries a code to compare, and is limited to 3 per 10 minutes.
 - The web page is plain HTTP on your local network: an approved browser
   session could be sniffed by someone else on the same WiFi. It never shows
   codes or secrets, but it can delete passkeys and log the campus session
@@ -608,7 +626,8 @@ Flash the normal build afterwards: `pio run -t upload`.
 src/
   main.cpp               setup + cooperative main loop
   config.h               pins and constants (secrets: .env via scripts/env_secrets.py)
-  core/                  event log (persistent), settings, PIN, on-device approvals, backup
+  core/                  event log (persistent), settings, PIN, on-device approvals, backup, heap figures
+  third_party/           mbedTLS dynamic record buffers (from ESP-IDF, Apache-2.0)
   crypto/                mbedTLS wrappers (P-256, AES-GCM, HKDF, ...)
   util/                  CBOR reader/writer, hex/base32, FIDO QR digits
   fido/                  CTAP 2.0 engine, credential derivation & storage

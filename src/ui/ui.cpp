@@ -3,6 +3,7 @@
 #include "config.h"
 #include "core/approval.h"
 #include "core/log.h"
+#include "core/mem.h"
 #include "core/settings.h"
 #include "fido/credentials.h"
 #include "fido/ctap2.h"
@@ -490,7 +491,7 @@ static void drawInfo() {
     snprintf(line, sizeof(line), "Sign count: %lu", (unsigned long)settings::signCount());
     g_lcd.drawStr(0, 36, line);
     if (network::connected()) snprintf(line, sizeof(line), "Web: http://%s/", network::ip().c_str());
-    else snprintf(line, sizeof(line), "Free heap: %u", (unsigned)ESP.getFreeHeap());
+    else snprintf(line, sizeof(line), "Free heap: %u", (unsigned)mem::freeHeap());
     g_lcd.drawStr(0, 45, line);
     snprintf(line, sizeof(line), "Up %lus", (unsigned long)(millis() / 1000));
     g_lcd.drawStr(0, 54, line);
@@ -593,7 +594,7 @@ static void drawApproval(const approval::Request* a) {
     centered(26, a->detail);
     centered(37, a->hint);
     uint32_t elapsed = millis() - a->startedMs;
-    uint32_t left = elapsed < FIDO_USER_TIMEOUT_MS ? (FIDO_USER_TIMEOUT_MS - elapsed) / 1000 : 0;
+    uint32_t left = elapsed < a->timeoutMs ? (a->timeoutMs - elapsed) / 1000 : 0;
     char t[16];
     snprintf(t, sizeof(t), "%lus", (unsigned long)left);
     g_lcd.drawStr(W - g_lcd.getStrWidth(t), 47, t);

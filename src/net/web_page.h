@@ -117,10 +117,11 @@ $('clast').textContent=c.last||'-';$('cnext').textContent=(c.online&&c.owns?'ref
 $('ccount').textContent=c.logins+' login(s), '+c.refreshes+' refresh(es)';$('cauto').textContent='Auto-login: '+(c.auto?'ON':'off');
 $('hy').textContent=S.hybrid;
 if(S.auth!==authed){authed=S.auth;document.querySelectorAll('.auth').forEach(e=>e.classList.toggle('hidden',!authed));$('lockCard').classList.toggle('hidden',authed);if(authed)loadAll()}}
-async function unlock(){$('unlockBtn').disabled=true;$('unlockMsg').textContent='Press OK on the AuthKey...';
-try{const r=await post('/api/session');for(let i=0;i<40;i++){await new Promise(z=>setTimeout(z,1000));const p=await api('/api/session?id='+r.id);
+async function unlock(){$('unlockBtn').disabled=true;$('unlockMsg').textContent='Asking the AuthKey...';
+try{const r=await post('/api/session');$('unlockMsg').textContent=(r.telegram?'Press OK on the AuthKey, or tap Allow in Telegram.':'Press OK on the AuthKey.')+' Code: '+r.code;
+for(let i=0;i<(r.telegram?95:40);i++){await new Promise(z=>setTimeout(z,1000));const p=await api('/api/session?id='+r.id);
 if(p.state==='allowed'){$('unlockMsg').textContent='';await status();break}
-if(p.state!=='waiting'){$('unlockMsg').textContent=p.state==='denied'?'Denied on the device.':'Timed out.';break}}}
+if(p.state!=='waiting'){$('unlockMsg').textContent=p.state==='denied'?'Denied.':'Timed out.';break}}}
 catch(e){$('unlockMsg').textContent=e.message}$('unlockBtn').disabled=false}
 async function lock(){await post('/api/logout');authed=false;S=null;location.reload()}
 async function loadLog(){const j=await api('/api/log');$('log').textContent=j.lines.slice().reverse().join('\n')||'(empty)'}

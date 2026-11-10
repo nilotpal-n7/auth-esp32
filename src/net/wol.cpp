@@ -614,6 +614,10 @@ bool check(int i, uint16_t* port, uint32_t* ms) {
     IPAddress ip;
     if (!s_hosts[i].ip[0] || !ip.fromString(s_hosts[i].ip)) return false;
     bool up = false;
+    // A machine already known to be down that stays silent (no answer at all,
+    // not "port closed") would cost one more timeout per further port, and
+    // everything else waits meanwhile. Every 5th check still tries them all.
+    bool quick = s_rt[i].fails >= 2 && s_rt[i].fails % 5 != 0;
     for (uint16_t p : s_hosts[i].ports) {
         if (!p) continue;
         WiFiClient c;
@@ -625,6 +629,7 @@ bool check(int i, uint16_t* port, uint32_t* ms) {
             up = true;
             break;
         }
+        if (quick && millis() - t0 >= WOL_CONNECT_TIMEOUT_MS - 100) break;
     }
     s_rt[i].state = up ? 1 : 0;
     s_rt[i].checkedMs = millis() | 1;

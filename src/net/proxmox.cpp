@@ -1,6 +1,7 @@
 #include "net/proxmox.h"
 #include "config.h"
 #include "core/log.h"
+#include "core/mem.h"
 #include "crypto/crypto.h"
 #include "net/network.h"
 #include "net/telegram.h"
@@ -31,6 +32,7 @@ static const int N = 0;
 #endif
 
 #define PVE_TIMEOUT_MS  10000
+#define PVE_CONNECT_TIMEOUT_MS 4000              // TCP connect: the main loop waits meanwhile
 #define MAX_GUESTS      24
 
 static Preferences s_prefs;
@@ -182,21 +184,26 @@ public:
         }
         if (!network::connected()) { err = "the AuthKey has no WiFi"; return false; }
         if (hybrid::state() != hybrid::State::Idle) { err = "busy with a passkey sign-in; try again in a minute"; return false; }
-        telegram::releaseTls();                // only one TLS session fits in RAM
-        if (ESP.getFreeHeap() < TG_MIN_FREE_HEAP || ESP.getMaxAllocHeap() < TG_MIN_HEAP) {
-            err = String("not enough RAM for TLS right now (free ") + ESP.getFreeHeap() + ")";
+        // The bot's session normally stays up next to this one; it only makes
+        // room when RAM is short.
+        if (!mem::roomForTls()) telegram::releaseTls();
+        if (!mem::roomForTls()) {
+            err = String("not enough RAM for TLS right now (free ") + mem::freeHeap() + ")";
             return false;
         }
         tls_.setInsecure();                    // self-signed: checked by the pin below instead
         tls_.setHandshakeTimeout(10);
-        bool ok = tls_.connect(ip_, port_);
+        uint32_t failsBefore = mem::failures();
+        bool ok = tls_.connect(ip_, port_, PVE_CONNECT_TIMEOUT_MS);
         char why[80] = "";
-        if (!ok && tls_.lastError(why, sizeof(why)) == -0x7F00 /* MBEDTLS_ERR_SSL_ALLOC_FAILED */) {
-            // Right after the bot hangs up the heap can still be fragmented: once more.
+        if (!ok) tls_.lastError(why, sizeof(why));
+        if (!ok && mem::failures() != failsBefore) {
+            // An allocation failed half-way: once more with the bot's RAM too.
             tls_.stop();
-            delay(300);
+            telegram::releaseTls();
+            delay(100);
             why[0] = '\0';
-            ok = tls_.connect(ip_, port_);
+            ok = tls_.connect(ip_, port_, PVE_CONNECT_TIMEOUT_MS);
             if (!ok) tls_.lastError(why, sizeof(why));
         }
         if (!ok) {
