@@ -97,7 +97,8 @@
 #define TG_LONG_POLL_SECS       25                 // Telegram holds getUpdates open this long
 #define TG_MAX_COMMAND_AGE_SECS 120                // older commands (queued while off) are ignored
 #define TG_BACKOFF_MIN_SECS     5
-#define TG_BACKOFF_MAX_SECS     120
+#define TG_BACKOFF_MAX_SECS     30                 // network errors: retry at least this often
+#define TG_CONNECT_TIMEOUT_MS   5000               // TCP connect (the loop blocks meanwhile)
 #define TG_MIN_HEAP             20000              // largest free block: TLS allocates 16 KB record buffers
 #define TG_MIN_FREE_HEAP        62000              // total free heap needed (TLS peaks at ~54 KB)
 

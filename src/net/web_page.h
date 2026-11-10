@@ -98,7 +98,9 @@ pre{margin:0;font:12px/1.5 ui-monospace,Consolas,monospace;white-space:pre-wrap;
 <script>
 const $=id=>document.getElementById(id);let S=null,authed=false;
 function msg(t){const m=$('msg');m.textContent=t;m.classList.add('show');clearTimeout(m._t);m._t=setTimeout(()=>m.classList.remove('show'),2500)}
-async function api(p,o={}){const r=await fetch(p,Object.assign({credentials:'same-origin'},o,{headers:Object.assign({'X-AuthKey':'1'},o.headers||{})}));
+// One request at a time: parallel ones each sit in the device's RAM.
+let Q=Promise.resolve();function api(p,o={}){const r=Q.then(()=>api1(p,o));Q=r.catch(()=>{});return r}
+async function api1(p,o={}){const r=await fetch(p,Object.assign({credentials:'same-origin',signal:AbortSignal.timeout?AbortSignal.timeout(15000):undefined},o,{headers:Object.assign({'X-AuthKey':'1'},o.headers||{})}));
 let j={};try{j=await r.json()}catch(e){}if(!r.ok)throw new Error(j.error||('HTTP '+r.status));return j}
 const post=(p,body)=>api(p,{method:'POST',body:body||''});
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}

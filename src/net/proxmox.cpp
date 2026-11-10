@@ -11,6 +11,8 @@
 #include <Preferences.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
+#include <memory>
+#include <new>
 
 namespace proxmox {
 
@@ -475,10 +477,12 @@ bool summary(int c, String& out) {
              gb(s["rootfs"]["used"] | 0.0).c_str(), gb(s["rootfs"]["total"] | 0.0).c_str());
     out += line;
 
-    static Guest g[MAX_GUESTS];   // static: the loop stack is small
+    // On the heap for this call only (not static: RAM is short; not on the small loop stack).
+    std::unique_ptr<Guest[]> g(new (std::nothrow) Guest[MAX_GUESTS]);
+    if (!g) { out += "(out of memory for the guest list)\n"; return true; }
     int n = 0, running = 0;
     String gerr;
-    loadGuests(api, c, g, MAX_GUESTS, &n, gerr);
+    loadGuests(api, c, g.get(), MAX_GUESTS, &n, gerr);
     for (int i = 0; i < n; i++) running += g[i].running;
     out += String("\nGuests (") + running + " of " + n + " running):\n";
     for (int i = 0; i < n; i++)
@@ -515,9 +519,10 @@ bool guestPower(int c, int vmid, const char* action, String& out) {
     Api api(c);
     String err;
     if (!ensureNode(api, c, err)) { out = pinNotice(c) + "❌ " + err; return false; }
-    static Guest g[MAX_GUESTS];   // static: the loop stack is small
+    std::unique_ptr<Guest[]> g(new (std::nothrow) Guest[MAX_GUESTS]);
+    if (!g) { out = "❌ out of memory"; return false; }
     int n = 0;
-    loadGuests(api, c, g, MAX_GUESTS, &n, err);
+    loadGuests(api, c, g.get(), MAX_GUESTS, &n, err);
     const Guest* found = nullptr;
     for (int i = 0; i < n; i++) if (g[i].vmid == vmid) found = &g[i];
     if (!found) { out = String("No guest ") + vmid + " on " + s_node[c] + "."; return false; }

@@ -19,6 +19,8 @@
 #include <Preferences.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
+#include <memory>
+#include <new>
 #include <mbedtls/x509_crt.h>
 
 namespace telegram {
@@ -938,10 +940,11 @@ static void cmdVm(long long chat, char* arg) {
         return;
     }
     if (pveBusy(chat)) return;
-    static proxmox::Guest g[24];   // static: the loop stack is small
+    std::unique_ptr<proxmox::Guest[]> g(new (std::nothrow) proxmox::Guest[24]);   // this call only
+    if (!g) { reply(chat, "❌ out of memory"); return; }
     int count = 0;
     String err;
-    if (!proxmox::guests(c, g, 24, &count, err) && !count) { reply(chat, "❌ " + err); return; }
+    if (!proxmox::guests(c, g.get(), 24, &count, err) && !count) { reply(chat, "❌ " + err); return; }
     if (!n) {
         String s = String("Guests on ") + m + ":\n";
         Buttons b;
@@ -1206,19 +1209,24 @@ static int parseResponse(char** body, size_t* bodyLen, bool* keepAlive) {
     return status;
 }
 
+static bool s_ramWait = false;    // the last connect attempt only waited for RAM
+
 static bool connectTls() {
+    s_ramWait = false;
     // A TLS session peaks at ~54 KB here; trying with less just fails (as a
     // "certificate verification failed" when RSA can't allocate) and
     // fragments the heap further.
     if (ESP.getMaxAllocHeap() < TG_MIN_HEAP || ESP.getFreeHeap() < TG_MIN_FREE_HEAP) {
         setError("waiting for RAM (free %u, largest %u)", (unsigned)ESP.getFreeHeap(),
                  (unsigned)ESP.getMaxAllocHeap());
+        s_ramWait = true;
         return false;
     }
     s_tls.setCACert(TELEGRAM_ROOT_CA);
     s_tls.setHandshakeTimeout(10);
     logf("TG", "connecting to %s", TG_HOST);
-    if (!s_tls.connect(TG_HOST, 443)) {
+    // 5 s for the TCP connect: the main loop (web page included) waits meanwhile.
+    if (!s_tls.connect(TG_HOST, 443, TG_CONNECT_TIMEOUT_MS)) {
         char why[100] = "";
         int code = s_tls.lastError(why, sizeof(why));
         if (code == -0x2700 /* MBEDTLS_ERR_X509_CERT_VERIFY_FAILED */) {
@@ -1512,7 +1520,13 @@ void loop() {
     if ((int32_t)(millis() - s_nextTryMs) < 0) return;
     if (!s_connected) {
         if (ctap::busy()) return;            // the handshake would stall a passkey prompt
-        if (!connectTls()) { backOff(); return; }
+        if (!connectTls()) {
+            // RAM is usually back within seconds (a web request, a closed
+            // connection): retry soon instead of backing off for minutes.
+            if (s_ramWait) { hangUp(); s_nextTryMs = millis() + 3000; }
+            else backOff();
+            return;
+        }
     }
     if (s_outCount) sendRequest(s_out[s_outHead]);
     else sendPoll();

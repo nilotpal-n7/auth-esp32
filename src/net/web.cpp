@@ -27,6 +27,8 @@ namespace web {
 
 #define WEB_SESSIONS        4
 #define WEB_SESSION_MS      (12UL * 3600UL * 1000UL)
+#define WEB_MIN_FREE_HEAP   14000      // below this, requests wait (see loop())
+#define WEB_MIN_BLOCK       8000
 
 struct Session {
     char     token[33];
@@ -742,6 +744,19 @@ void loop() {
     }
     if (!s_started) {
         if (network::connected()) start();
+        return;
+    }
+    // Reading a request copies each header line a few times (a browser's
+    // Cookie header can be 2+ KB). If malloc fails there, the core's
+    // String::move reads a null pointer and the device crashes. While RAM is
+    // short, leave the request waiting; a later pass serves it.
+    if (ESP.getFreeHeap() < WEB_MIN_FREE_HEAP || ESP.getMaxAllocHeap() < WEB_MIN_BLOCK) {
+        static uint32_t lastLog = 0;
+        if (millis() - lastLog > 10000) {
+            lastLog = millis();
+            logf("WEB", "low RAM (free %u, largest %u): requests wait", (unsigned)ESP.getFreeHeap(),
+                 (unsigned)ESP.getMaxAllocHeap());
+        }
         return;
     }
     s_http.handleClient();
